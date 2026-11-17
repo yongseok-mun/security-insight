@@ -50,6 +50,9 @@ let selected;
 let priorities = [];
 let newsMode = 'recent';
 let mailDraft;
+let prioritySelection = null;
+let loading = false;
+let clockTimer;
 let page = 'home';
 let view = 'latest';
 const newest = (a, b) => (Date.parse(b.published) || 0) - (Date.parse(a.published) || 0)
@@ -71,21 +74,33 @@ function rowsForFilters() {
 }
 
 function renderPriority() {
+  const panel = $('#priority-inspector');
+  const item = priorities.find((entry) => entry.id === prioritySelection);
+  prioritySelection = item?.id || null;
+  panel.hidden = true;
+  $('#priority').append(panel);
   $('#priority').hidden = priorities.length === 0;
-  $('#priority-list').innerHTML = priorities.map((item) => `
-    <li><button type="button" class="priority-row" data-cve="${escape(item.id)}">
-      <span class="priority-copy"><span>${escape(item.id)}</span><strong>${escape(item.title)}</strong></span>
+  $('#priority-list').innerHTML = priorities.map((entry) => `
+    <li><button type="button" class="priority-row" data-cve="${escape(entry.id)}"
+      aria-expanded="${entry === item}" aria-controls="priority-inspector">
+      <span class="priority-copy"><span>${escape(entry.id)}</span><strong>${escape(entry.title)}</strong></span>
       <span class="cve-meta">
-        ${item.kev === true ? '<span class="pill kev">KEV</span>' : ''}
-        <span class="pill">CVSS ${cvss(item)}</span>
-        <span class="pill">EPSS ${epss(item)}</span>
+        ${entry.kev === true ? '<span class="pill kev">KEV</span>' : ''}
+        <span class="pill">CVSS ${cvss(entry)}</span>
+        <span class="pill">EPSS ${epss(entry)}</span>
       </span>
-      <span class="priority-detail">상세 보기 <span aria-hidden="true">→</span></span>
+      <span class="priority-detail">${entry === item ? '상세 닫기' : '상세 보기'} <span aria-hidden="true">⌄</span></span>
     </button></li>`).join('');
+  if (item) {
+    renderInspector(panel, item);
+    $('#priority-list [aria-expanded="true"]').after(panel);
+    panel.hidden = false;
+  }
 }
 
 // The Pages workflow starts at minute 17 on every even UTC hour.
 function updateClock(stamp) {
+  clearInterval(clockTimer);
   const collected = new Date(stamp);
   const next = new Date(collected);
   next.setUTCHours(Math.floor(next.getUTCHours() / 2) * 2, 17, 0, 0);
@@ -95,12 +110,14 @@ function updateClock(stamp) {
   const tick = () => {
     const seconds = Math.max(0, Math.ceil((next - Date.now()) / 1000));
     const parts = [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60];
+    const progress = Math.max(0, Math.min(100, (Date.now() - collected) / (next - collected) * 100));
+    $('#update-progress').style.width = `${progress}%`;
     $('#countdown').textContent = seconds
       ? parts.map((part) => String(part).padStart(2, '0')).join(':')
       : '갱신 대기';
   };
   tick();
-  setInterval(tick, 1000);
+  clockTimer = setInterval(tick, 1000);
 }
 
 function renderRows() {
@@ -155,9 +172,7 @@ function evidence(item) {
     + item.notices.map((notice) => `<p class="evidence-link">${link(notice.url, 'KISA · ' + notice.title)}</p>`).join('');
 }
 
-function renderInspector() {
-  const panel = $('#inspector');
-  const item = selected;
+function renderInspector(panel = $('#inspector'), item = selected) {
   if (!item) {
     panel.innerHTML = '<p class="empty">표시할 CVE가 없습니다.</p>';
     return;
@@ -179,7 +194,7 @@ function renderInspector() {
     <h3>취약점 설명</h3>
     <p class="cve-summary">${escape(item.description || '수집된 NVD 설명이 없습니다.')}</p>
     <h3>출처 확인</h3>
-    <div id="source-list">${evidence(item)}</div>
+    <div class="source-list">${evidence(item)}</div>
     <div class="actions">
       <button class="accent" data-guide="analysis">${icon('search')}CVE 상세</button>
       <button class="outline" data-guide="check">${icon('shield')}안전한 점검</button>
@@ -187,6 +202,7 @@ function renderInspector() {
 }
 
 function showPage(name) {
+  if (page !== name) $('#feed').replaceChildren();
   page = name;
   $('#cve-view').hidden = page !== 'cve';
   $('#overview').hidden = page !== 'home';
@@ -198,6 +214,12 @@ function showPage(name) {
   });
   if (page === 'home') renderOverview();
   else if (page !== 'cve') renderFeed();
+  const section = $(page === 'home' ? '#overview' : page === 'cve' ? '#cve-view' : '#feed');
+  section.getAnimations().forEach((animation) => animation.cancel());
+  if (!matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    section.animate([{opacity: .5, transform:'translateY(5px)'}, {opacity:1, transform:'translateY(0)'}],
+      {duration:180, easing:'ease-out'});
+  }
 }
 
 function renderOverview() {
@@ -250,6 +272,7 @@ function filteredNews() {
 }
 
 function renderFeed() {
+  const before = {source: $('#feed-source')?.value || '', query: $('#news-query')?.value || ''};
   const sourceNames = [...new Set(newsForPage().map((article) => article.publisher))].sort();
   $('#feed').innerHTML = `
     ${page === 'dark' ? '<p class="feed-note">공개 언론의 다크웹·랜섬웨어 관련 보도입니다. 개별 주장은 원문에서 확인하세요.</p>' : ''}
@@ -261,6 +284,8 @@ function renderFeed() {
       <label class="feed-filter">매체<select id="feed-source"><option value="">전체 매체</option>${sourceNames.map((name) => `<option>${escape(name)}</option>`).join('')}</select></label>
     </div>
     <div id="articles"></div>`;
+  if (sourceNames.includes(before.source)) $('#feed-source').value = before.source;
+  $('#news-query').value = before.query;
   const article = (item) => `<article>
     <small>${escape(item.publisher)} · ${escape(date(item.date))}${item.kind === 'aggregated' ? ' · Google 뉴스 경유' : ''}</small>
     <h3>${link(item.url, item.title)}</h3></article>`;
@@ -346,8 +371,16 @@ $('#overview').addEventListener('click', (event) => {
   if (item) openCve(item.dataset.cve);
 });
 $('#priority-list').addEventListener('click', (event) => {
-  const item = event.target.closest('[data-cve]');
-  if (item) openCve(item.dataset.cve);
+  const row = event.target.closest('.priority-row');
+  if (!row) return;
+  const id = row.dataset.cve;
+  prioritySelection = prioritySelection === id ? null : id;
+  renderPriority();
+  [...document.querySelectorAll('.priority-row')].find((button) => button.dataset.cve === id)?.focus();
+});
+$('#priority-inspector').addEventListener('click', (event) => {
+  const button = event.target.closest('[data-guide]');
+  if (button) showGuide(priorities.find((item) => item.id === prioritySelection), button.dataset.guide);
 });
 
 function buildMail() {
@@ -423,11 +456,26 @@ $('#email-form').addEventListener('submit', (event) => {
   setTimeout(() => URL.revokeObjectURL(url), 30000);
 });
 
-async function load() {
+async function load(manual = false) {
+  if (loading) return;
+  loading = true;
+  const reload = $('#refresh-data');
+  const note = $('#refresh-note');
+  reload.disabled = true;
+  if (manual) note.textContent = '새 데이터를 확인하고 있습니다.';
   try {
     const response = await fetch('./data.json', {cache:'no-cache'});
     if (!response.ok) throw Error(`Snapshot HTTP ${response.status}`);
-    data = await response.json();
+    const snapshot = await response.json();
+    if (snapshot.updatedAt === data.updatedAt) {
+      if (manual) note.textContent = '현재 최신 데이터를 보고 있습니다.';
+      return;
+    }
+    const alreadyLoaded = Boolean(data.updatedAt);
+    const currentSelection = selected?.id;
+    const currentProduct = $('#product').value;
+    data = snapshot;
+    selected = data.cves.find((item) => item.id === currentSelection);
     priorities = [...data.cves].sort(comparePriority).slice(0, 3);
     const stamp = $('#freshness');
     stamp.dateTime = data.updatedAt;
@@ -438,16 +486,25 @@ async function load() {
     $('#source-status-list').innerHTML = Object.entries(data.sources).map(([name, status]) =>
       `<li>${escape(name)} <span>${states[status.state]} · ${status.count}건${status.at ? ` · ${escape(date(status.at))}` : ''}</span></li>`).join('');
     const products = [...new Set(data.cves.map((item) => item.product).filter(Boolean))].sort();
-    products.forEach((product) => $('#product').add(new Option(product, product)));
+    $('#product').replaceChildren(new Option('모든 제품', ''), ...products.map((product) => new Option(product, product)));
+    if (products.includes(currentProduct)) $('#product').value = currentProduct;
     renderPriority();
     renderRows();
     if (page === 'home') renderOverview();
     else if (page !== 'cve') renderFeed();
+    if (manual || alreadyLoaded) note.textContent = '새 데이터가 반영됐습니다.';
   } catch (error) {
-    $('#freshness').textContent = '데이터를 불러오지 못했습니다. 새로고침해 주세요.';
+    if (!data.updatedAt) $('#freshness').textContent = '수집 데이터 로딩 실패';
+    if (manual) note.textContent = '갱신을 확인하지 못했습니다. 잠시 후 다시 시도해 주세요.';
     console.error(error);
-    renderRows();
+  } finally {
+    reload.disabled = false;
+    loading = false;
   }
 }
 
+$('#refresh-data').addEventListener('click', () => load(true));
 load();
+setInterval(() => {
+  if (!document.hidden) load();
+}, 60000);

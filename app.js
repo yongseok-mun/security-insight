@@ -102,7 +102,7 @@ const productAliases = {
 };
 const matchesProduct = (item, product) => {
   const name = normalizeProduct(product);
-  const names = productAliases[name] || [name];
+  const names = Object.hasOwn(productAliases, name) ? productAliases[name] : [name];
   const metadata = (item.cna?.affected || []).flatMap(({vendor, product: affected}) =>
     [vendor, affected, [vendor, affected].filter(Boolean).join(' ')]);
   const searchable = [item.product, ...metadata].filter(Boolean);

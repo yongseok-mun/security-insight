@@ -18,6 +18,9 @@ import xml.etree.ElementTree as xml
 ROOT = Path(__file__).resolve().parent
 KST = dt.timezone(dt.timedelta(hours=9))
 NOW = dt.datetime.now(dt.timezone.utc)
+HISTORY_DAYS = 7
+MAX_CVES = 140
+NVD_EXTRA = 30
 CVE = re.compile(r'\bCVE-\d{4}-\d{4,}\b', re.I)
 DARK = re.compile(r'다크웹|랜섬웨어|탈취.*판매|dark.?web|ransomware|leak site', re.I)
 SECURITY = re.compile(r'보안|해킹|침해|취약점|랜섬웨어|정보.?유출|악성코드|사이버|security|CVE-', re.I)
@@ -190,7 +193,9 @@ def cve_now():
 
 
 def recent_kev(catalog):
-    entries = sorted(catalog.values(), key=lambda item: item['dateAdded'], reverse=True)[:10]
+    entries = sorted(catalog.values(), key=lambda item: item['dateAdded'], reverse=True)
+    cutoff = (NOW - dt.timedelta(days=HISTORY_DAYS)).date().isoformat()
+    entries = [item for index, item in enumerate(entries) if index < 10 or item['dateAdded'] >= cutoff]
     return [dict(id=item['cveID'], title=item['vulnerabilityName'],
                  product=f"{item['vendorProject']} {item['product']}", kev=True,
                  origin='CISA KEV') for item in entries]
@@ -225,9 +230,14 @@ def metric(record):
 def epss(ids):
     if not ids:
         return {}
-    payload = json.loads(get('https://api.first.org/data/v1/epss?' + url.urlencode({'cve': ','.join(ids)})))
-    return {row['cve']: dict(score=round(float(row['epss']) * 100, 2), date=row['date'])
-            for row in payload['data']}
+    scores = {}
+    for start in range(0, len(ids), 70):
+        batch = ','.join(ids[start:start + 70])
+        payload = json.loads(get('https://api.first.org/data/v1/epss?' + url.urlencode({'cve': batch})))
+        scores.update({row['cve']: dict(score=round(float(row['epss']) * 100, 2), date=row['date'])
+                       for row in payload['data']})
+    return scores
+
 
 
 CVE_LIST = 'https://raw.githubusercontent.com/CVEProject/cvelistV5/main/cves'
@@ -283,16 +293,23 @@ def enrich_cves(records, previous, translations):
             # Keep unchanged records warm for six hours, then recheck editorial revisions.
             last_checked = old.get('cnaChecked')
             if last_checked and NOW - dt.datetime.fromisoformat(last_checked) < dt.timedelta(hours=6):
-                item.update({key: old[key] for key in ('cna', 'cnaChecked', 'cnaEnglish', 'cnaKorean') if key in old})
+                item.update({key: old[key] for key in ('cna', 'cnaChecked', 'cnaEnglish', 'cnaKorean', 'cnaTitle') if key in old})
             else:
                 cna = cna_record(item['id'])
                 if cna:
                     item['cna'] = cna_details(cna)
                     item['cnaChecked'] = NOW.isoformat()
+                    item['cnaTitle'] = clean(cna.get('title'))
                     item['cnaEnglish'] = next(iter(localized(cna, 'descriptions', 'en')), None)
                     item['cnaKorean'] = next(iter(localized(cna, 'descriptions', 'ko')), None)
                 elif old.get('cna'):
-                    item.update({key: old[key] for key in ('cna', 'cnaChecked', 'cnaEnglish', 'cnaKorean') if key in old})
+                    item.update({key: old[key] for key in ('cna', 'cnaChecked', 'cnaEnglish', 'cnaKorean', 'cnaTitle') if key in old})
+            cna_info = item.get('cna') or {}
+            affected = cna_info.get('affected', [])
+            if not item.get('product') and affected:
+                item['product'] = affected[0].get('product') or None
+            if item['title'] == item['id'] and item.get('cnaTitle'):
+                item['title'] = item['cnaTitle']
             english = item.get('descriptionEn') or item.get('cnaEnglish')
             korean = (item.get('descriptionKo') if item.get('translationSource') != '한국어 요약' else None) or item.get('cnaKorean')
             if korean:
@@ -339,6 +356,126 @@ def normalize(item, record, kev, probability, news):
                 references=list(dict.fromkeys(references))[:5], notices=notices[:3])
 
 
+def moment(value):
+    normalized = timestamp(value)
+    return dt.datetime.fromisoformat(normalized) if normalized else None
+
+
+def candidates(feed, nvd, kev, previous):
+    previous_at = previous.get('updatedAt')
+    cutoff = NOW - dt.timedelta(days=HISTORY_DAYS)
+    items = {}
+    for item in feed:
+        items[item['id']] = {**item, 'lastDiscoveredAt': NOW.isoformat()}
+    for item in recent_kev(kev):
+        items.setdefault(item['id'], {**item, 'lastDiscoveredAt': NOW.isoformat()})
+    published = sorted(nvd.values(), key=lambda item: item.get('published') or '', reverse=True)
+    extra = 0
+    for item in published:
+        if item['id'] in items or item.get('vulnStatus', '').lower() == 'rejected':
+            continue
+        # NVD also seeds independently discoverable entries if the other feed is late.
+        items[item['id']] = dict(id=item['id'], origin='NVD', publishedAt=item.get('published'),
+                                 lastDiscoveredAt=NOW.isoformat())
+        extra += 1
+        if extra >= NVD_EXTRA:
+            break
+    for old in previous.get('cves', []):
+        retained_at = old.get('lastDiscoveredAt') or previous_at
+        if retained_at and moment(retained_at) >= cutoff:
+            items.setdefault(old['id'], dict(id=old['id'], origin=old.get('origin', 'cve.now'),
+                                            lastDiscoveredAt=retained_at))
+    return [item for item in items.values()
+            if nvd.get(item['id'], {}).get('vulnStatus', '').lower() != 'rejected'][:MAX_CVES]
+
+
+def merge_record(item, old, nvd, kev, probability, news, statuses):
+    cve_id = item['id']
+    nvd_record = nvd.get(cve_id, {})
+    current = normalize(item, nvd_record, kev, probability, news)
+    stamps = dict(old.get('sourceTimes', {}))
+    current['lastDiscoveredAt'] = item['lastDiscoveredAt']
+    for key in ('title', 'product', 'url', 'published'):
+        if (not current.get(key) or ('title' not in item and key == 'title')) and old.get(key):
+            current[key] = old[key]
+    if item.get('origin') != 'cve.now' and old.get('origin') == 'cve.now':
+        current['origin'] = 'cve.now'
+    if item.get('origin', 'cve.now') == 'cve.now' and 'title' in item:
+        stamps['cve.now'] = statuses['cve.now']['at']
+    else:
+        current['fixes'] = old.get('fixes', current['fixes'])
+    if nvd_record:
+        source = 'NVD · KEV 보강' if cve_id in statuses.get('nvdSupplementIds', ()) else 'NVD'
+        stamps['NVD'] = statuses[source]['at']
+    elif old.get('nvd'):
+        for key in ('nvd', 'nvdStatus', 'references', 'descriptionEn'):
+            current[key] = old.get(key)
+        current['descriptionKo'] = old.get('descriptionKo') if old.get('translationSource') == '공식 레코드' else None
+    if current['cvss'] is None or (not nvd_record and old.get('cvssSource') not in (None, 'cve.now')):
+        for key in ('cvss', 'cvssSource', 'cvssVersion', 'vector'):
+            current[key] = old.get(key)
+    if statuses['CISA KEV']['state'] == 'ok':
+        stamps['CISA KEV'] = statuses['CISA KEV']['at']
+    elif old.get('kev') is not None:
+        for key in ('kev', 'kevDate', 'requiredAction'):
+            current[key] = old.get(key)
+    epss_ok = statuses['FIRST EPSS']['state'] == 'ok'
+    if current['epss']:
+        current['epssStatus'] = 'ok'
+        stamps['FIRST EPSS'] = statuses['FIRST EPSS']['at']
+    elif not epss_ok and old.get('epss') is not None:
+        current['epss'] = old['epss']
+        current['epssStatus'] = 'stale'
+    else:
+        current['epssStatus'] = 'missing' if epss_ok else 'unavailable'
+    current['sourceTimes'] = stamps
+    return current
+
+
+def remediation_values(item):
+    cna = item.get('cna') or {}
+    return {
+        '패치 버전': sorted(set(item.get('fixes', []) + item.get('describedFixes', []))),
+        '해결책': sorted(set(cna.get('solutions', []))),
+        '완화책': sorted(set(cna.get('workarounds', []))),
+        'CISA 조치 권고': [item['requiredAction']] if item.get('requiredAction') else [],
+    }
+
+
+def build_history(records, previous):
+    cutoff = NOW - dt.timedelta(days=HISTORY_DAYS)
+    previous_at = moment(previous.get('updatedAt'))
+    old_rows = {item['id']: item for item in previous.get('cves', [])}
+    history = [event for event in previous.get('history', []) if moment(event['at']) >= cutoff]
+    seen = {(event['id'], event['type'], event['at']) for event in history}
+
+    def add(item, kind, when, changes=None, day_only=False):
+        when = moment(when)
+        if not when or (when.date() < cutoff.date() if day_only else when < cutoff):
+            return
+        at = when.date().isoformat() if day_only else when.astimezone(dt.timezone.utc).isoformat()
+        key = (item['id'], kind, at)
+        if key in seen:
+            return
+        seen.add(key)
+        history.append(dict(id=item['id'], title=item['title'], type=kind, at=at, changes=changes or []))
+
+    for item in records:
+        old = old_rows.get(item['id'])
+        # The first release can reconstruct dates published by the sources.
+        if not old or 'history' not in previous:
+            add(item, 'published', item.get('published'))
+        if item.get('kev') is True and item.get('kevDate'):
+            add(item, 'kev', item['kevDate'], day_only=True)
+        if old:
+            before, after = remediation_values(old), remediation_values(item)
+            changes = [dict(field=key, before=before[key], after=after[key]) for key in after
+                       if before[key] != after[key]]
+            if changes and previous_at:
+                add(item, 'remediation', NOW.isoformat(), changes)
+    return sorted(history, key=lambda event: moment(event['at']), reverse=True)
+
+
 def collect():
     path = ROOT / 'data.json'
     previous = json.loads(path.read_text()) if path.exists() else {}
@@ -365,16 +502,19 @@ def collect():
         kev_job = pool.submit(attempt, 'CISA KEV', lambda: {
             row['cveID']: row for row in json.loads(get(KEV))['vulnerabilities']
         }, {})
-        items = now_job.result()
+        feed = now_job.result()
         kev = kev_job.result()
-        seen_ids = {item['id'] for item in items}
-        items.extend(item for item in recent_kev(kev) if item['id'] not in seen_ids)
+        nvd = nvd_job.result()
+        items = candidates(feed, nvd, kev, previous)
+        old_rows = {entry['id']: entry for entry in previous.get('cves', [])}
+        if statuses['cve.now']['state'] == 'unavailable' and any(row.get('origin') == 'cve.now' for row in old_rows.values()):
+            prior = previous.get('sources', {}).get('cve.now', {})
+            statuses['cve.now'] = dict(state='stale', at=prior.get('at'), count=prior.get('count', 0))
         probability_job = pool.submit(attempt, 'FIRST EPSS', lambda: epss([row['id'] for row in items]), {})
         feeds = {name: job.result() for name, job in feed_jobs.items()}
-        nvd = nvd_job.result()
         missing = [item['id'] for item in items if item.get('origin') == 'CISA KEV' and item['id'] not in nvd]
-        if missing:
-            nvd.update(attempt('NVD · KEV 보강', lambda: nvd_selected(missing), {}))
+        supplement = attempt('NVD · KEV 보강', lambda: nvd_selected(missing), {}) if missing else {}
+        nvd.update(supplement)
         probability = probability_job.result()
 
     add_article_images(feeds, previous_feeds)
@@ -385,17 +525,16 @@ def collect():
             news.append(article)
             seen.update((key, article['url']))
     news.sort(key=lambda a: dt.datetime.fromisoformat(a['date']).timestamp() if a['date'] else 0, reverse=True)
-    records = [normalize(item, nvd.get(item['id'], {}), kev, probability, news) for item in items]
-    if not seen_ids and previous.get('cves'):
-        records = previous.get('cves', [])
-        if records:
-            statuses['cve.now'] = dict(previous['sources'].get('cve.now', {}), state='stale')
+    merge_status = {**statuses, 'nvdSupplementIds': supplement.keys()}
+    records = [merge_record(item, old_rows.get(item['id'], {}), nvd, kev, probability, news, merge_status)
+               for item in items]
     if not records:
         raise SystemExit('No valid CVE snapshot available')
     translation_file = ROOT / 'cve-ko.json'
     translations = json.loads(translation_file.read_text(encoding='utf-8')) if translation_file.exists() else {}
     records = enrich_cves(records, previous, translations)
-    snapshot = dict(updatedAt=NOW.isoformat(), cves=records, news=news, feeds=feeds, sources=dict(sorted(statuses.items())))
+    snapshot = dict(updatedAt=NOW.isoformat(), cves=records, news=news, feeds=feeds,
+                    history=build_history(records, previous), sources=dict(sorted(statuses.items())))
     temp = path.with_suffix('.tmp')
     temp.write_text(json.dumps(snapshot, ensure_ascii=False, separators=(',', ':')) + '\n', encoding='utf-8')
     temp.replace(path)

@@ -219,3 +219,22 @@ dialog code { overflow-wrap: anywhere; }
 .triage-actions { align-items:center; }
 .copy-status input { width:min(350px,70vw); }
 @media(max-width:640px) { .action-summary dl { grid-template-columns:1fr; } }
+
+.recent-changes > h3 { margin-bottom:8px; }
+.history-group > summary, .cve-history > summary, .metric-freshness > summary { color:var(--text); font-size:13px; }
+.history-group > summary span { color:var(--muted); margin-left:4px; }
+.history-event { display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:baseline; gap:4px 12px; }
+.history-event time, .cve-history time { font-size:11px; color:var(--muted); }
+.history-event a { color:var(--pink); white-space:nowrap; }
+.history-event .change-values { grid-column:1/-1; }
+.change-values { margin:4px 0; font-size:12px; overflow-wrap:anywhere; }
+.change-values dt { font-weight:600; }
+.change-values dd { margin:2px 0; color:var(--muted); }
+.change-values dd strong { color:var(--text); margin-right:4px; }
+.cve-history article { margin:5px 0; }
+.cve-history time { margin-left:8px; }
+@media(max-width:620px) {
+  .history-event { grid-template-columns:1fr auto; }
+  .history-event > span { grid-column:1/-1; grid-row:2; }
+  .history-event > time { grid-row:1; grid-column:2; }
+}

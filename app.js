@@ -294,6 +294,37 @@ function actionSummary(item) {
     </section>`;
 }
 
+const historyTypes = {published:'신규 공개', kev:'KEV 등재', remediation:'패치·완화 정보 변경'};
+const historyDate = (event) => event.type === 'kev' ? event.at : date(event.at);
+
+function changeDetails(event) {
+  if (!event.changes?.length) return '';
+  return `<dl class="change-values">${event.changes.map((change) =>
+    `<div><dt>${escape(change.field)}</dt><dd><strong>이전</strong> ${escape(change.before.join(' / ') || '수집 정보 없음')}</dd>
+    <dd><strong>현재</strong> ${escape(change.after.join(' / ') || '수집 정보 없음')}</dd></div>`).join('')}</dl>`;
+}
+
+function cveHistory(item) {
+  const events = (data.history || []).filter((event) => event.id === item.id);
+  if (!events.length) return '';
+  return `<details class="cve-history">
+    <summary>최근 7일 변경 이력 · ${events.length}건</summary>
+    ${events.map((event) => `<article><strong>${historyTypes[event.type]}</strong>
+      <time datetime="${escape(event.at)}">${escape(historyDate(event))}</time>${changeDetails(event)}</article>`).join('')}
+  </details>`;
+}
+
+function metricFreshness(item) {
+  const labels = {ok:'', missing:'점수 미제공', unavailable:'수집 실패', stale:'이전 점수'};
+  const label = labels[item.epssStatus] || '';
+  const scoreDate = item.epss?.date;
+  const timestamps = Object.entries(item.sourceTimes || {});
+  return `${label || scoreDate ? `<p class="feed-note">EPSS ${escape([label, scoreDate && `기준일 ${scoreDate}`].filter(Boolean).join(' · '))}</p>` : ''}
+    ${timestamps.length ? `<details class="metric-freshness"><summary>출처별 확인 시각</summary>
+      <ul>${timestamps.map(([name, at]) => `<li>${escape(name)} · ${escape(date(at))}</li>`).join('')}
+      ${item.cnaChecked ? `<li>CNA · ${escape(date(item.cnaChecked))}</li>` : ''}</ul></details>` : ''}`;
+}
+
 function renderInspector(panel = $('#inspector'), item = selected) {
   if (!item) {
     panel.innerHTML = '<p class="empty">표시할 CVE가 없습니다.</p>';
@@ -307,11 +338,13 @@ function renderInspector(panel = $('#inspector'), item = selected) {
       <div>EPSS<strong>${epss(item)}</strong></div><div>KEV<strong>${kev(item)}</strong></div>
     </div>
     ${actionSummary(item)}
+    ${metricFreshness(item)}
     <div class="actions triage-actions">
       <button class="outline" data-guide="check">${icon('shield')}안전한 점검</button>
       <button class="outline" type="button" data-copy-cve>${icon('link')}이 CVE 링크 복사</button>
       <span class="copy-status" role="status"></span>
     </div>
+    ${cveHistory(item)}
     <div class="technical-details">${technicalDetails(item)}</div>
     <h3>출처 확인</h3>
     <div class="source-list">${evidence(item)}</div>
@@ -361,6 +394,22 @@ document.addEventListener('error', (event) => {
   if (event.target.matches?.('.news-thumb img')) event.target.hidden = true;
 }, true);
 
+function overviewHistory() {
+  const history = data.history || [];
+  const groups = ['kev', 'remediation', 'published'].map((type) => {
+    const events = history.filter((event) => event.type === type);
+    return `<details class="history-group" ${type === 'kev' ? 'open' : ''}>
+      <summary>${historyTypes[type]} <span>${events.length}건</span></summary>
+      ${events.map((event) => `<article class="history-event">
+        <a href="${escape(cveUrl(event.id))}">${escape(event.id)}</a>
+        <span>${escape(event.title)}</span><time datetime="${escape(event.at)}">${escape(historyDate(event))}</time>
+        ${changeDetails(event)}
+      </article>`).join('') || '<p class="feed-note">최근 7일간 기록된 항목이 없습니다.</p>'}
+    </details>`;
+  });
+  return `<section class="digest digest-cve recent-changes"><h3>최근 7일 변경 이력</h3>${groups.join('')}</section>`;
+}
+
 function renderOverview() {
   const sections = [
     ['issues', '핵심 이슈', data.news.filter((article) => article.kind === 'advisory' || article.cves.length)],
@@ -369,7 +418,7 @@ function renderOverview() {
     ['dark', '다크웹 보도', data.news.filter((article) => article.dark)],
   ];
   const view = $('#overview');
-  view.innerHTML = sections.map(([target, title, articles]) => `
+  view.innerHTML = overviewHistory() + sections.map(([target, title, articles]) => `
     <section class="digest">
       <header><h3>${title}</h3><button data-open="${target}">전체 보기 <span aria-hidden="true">→</span></button></header>
       ${articles.slice(0, 4).map((article) => newsArticle(article, 'h4')).join('') || '<p>수집된 항목 없음</p>'}

@@ -111,22 +111,43 @@ const matchesProduct = (item, product) => {
 };
 const watched = (item) => preferences.products.some((product) => matchesProduct(item, product));
 
-function remediationFingerprint(item) {
-  return JSON.stringify([
+// Keep the existing snapshot order for completion records saved by earlier releases.
+const remediationFields = ['패치 버전', '해결책', '완화책', 'CISA 조치 권고'];
+
+function remediationValues(item) {
+  return [
     [...new Set([...(item.fixes || []), ...(item.describedFixes || [])])].sort(),
     [...new Set(item.cna?.solutions || [])].sort(),
     [...new Set(item.cna?.workarounds || [])].sort(),
     item.requiredAction || '',
-  ]);
+  ];
+}
+
+const remediationFingerprint = (item) => JSON.stringify(remediationValues(item));
+
+function remediationSinceReview(item, review) {
+  const reviewedThrough = Date.parse(review.reviewedThrough);
+  return (data.history || []).filter((event) => event.id === item.id && event.type === 'remediation'
+    && Date.parse(event.at) > reviewedThrough);
 }
 
 function reviewState(item) {
   const review = preferences.reviews[item.id];
   if (review?.state === 'investigate') return 'investigate';
   if (review?.state !== 'done') return 'unreviewed';
-  const changed = (data.history || []).some((event) => event.id === item.id && event.type === 'remediation'
-    && Date.parse(event.at) > Date.parse(review.reviewedThrough));
-  return changed || review.fingerprint !== remediationFingerprint(item) ? 'recheck' : 'done';
+  return review.fingerprint !== remediationFingerprint(item) || remediationSinceReview(item, review).length
+    ? 'recheck' : 'done';
+}
+
+function completedRemediation(review) {
+  try {
+    const snapshot = JSON.parse(review.fingerprint);
+    if (Array.isArray(snapshot) && snapshot.length === remediationFields.length
+      && snapshot.slice(0, 3).every((values) => Array.isArray(values)
+        && values.every((value) => typeof value === 'string'))
+      && typeof snapshot[3] === 'string') return snapshot;
+  } catch { /* Some stored reviews may be missing a readable snapshot. */ }
+  return null;
 }
 
 function reviewBadge(item) {
@@ -561,6 +582,56 @@ function changeDetails(event) {
     <dd><strong>현재</strong> ${escape(change.after.join(' / ') || '수집 정보 없음')}</dd></div>`).join('')}</dl>`;
 }
 
+function reviewComparison(item, state) {
+  if (state !== 'done' && state !== 'recheck') return '';
+  const review = preferences.reviews[item.id];
+  const completed = completedRemediation(review);
+  const savedAt = Date.parse(review.completedAt);
+  const baselineAt = Date.parse(review.reviewedThrough);
+  const times = [
+    Number.isFinite(savedAt) ? `완료 기록 ${date(savedAt)}` : '',
+    Number.isFinite(baselineAt) ? `당시 데이터 ${date(baselineAt)}` : '',
+  ].filter(Boolean);
+  if (state === 'done') {
+    return times.length ? `<p class="review-baseline" data-review-comparison>${escape(times.join(' · '))}</p>` : '';
+  }
+  const current = remediationValues(item);
+  const events = remediationSinceReview(item, review)
+    .sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
+  const rows = completed ? remediationFields.flatMap((field, index) => {
+    if (JSON.stringify(completed[index]) === JSON.stringify(current[index])) return [];
+    const latest = events.find((event) => event.changes?.some((change) => change.field === field));
+    const values = (value) => (Array.isArray(value) ? value : [value]).filter(Boolean);
+    return [{field, before:values(completed[index]), after:values(current[index]), at:latest?.at}];
+  }) : [];
+  const renderedValues = (values) => values.length ? values.map(escape).join('<br>') : '기록된 정보 없음';
+  const sources = [
+    link(`https://www.cve.org/CVERecord?id=${encodeURIComponent(item.id)}`, 'CNA 원문'),
+    ...(item.cna?.references || []).map((url, index, urls) =>
+      link(url, urls.length > 1 ? `벤더 공지 ${index + 1}` : '벤더 공지')),
+    rows.some(({field}) => field === remediationFields[0]) && item.origin !== 'CISA KEV' ? link(item.url, 'cve.now') : '',
+    rows.some(({field}) => field === remediationFields[3]) ? link(
+      `https://www.cisa.gov/known-exploited-vulnerabilities-catalog?search_api_fulltext=${encodeURIComponent(item.id)}`, 'CISA KEV') : '',
+  ].filter(Boolean);
+  let content = rows.length ? rows.map(({field, before, after, at}) => `
+    <div class="review-difference">
+      <div class="review-difference-heading"><strong>${escape(field)}</strong>
+        <small>${at ? `변경 감지 ${escape(date(at))}` : '변경 감지 시각 미확인'}</small></div>
+      <dl><div><dt>완료 당시</dt><dd>${renderedValues(before)}</dd></div>
+        <div><dt>현재</dt><dd>${renderedValues(after)}</dd></div></dl>
+    </div>`).join('') : '<p>완료 당시 정보와 현재 값이 같습니다. 중간에 감지된 변경 내역을 확인하세요.</p>';
+  if (!completed) content = '<p>완료 당시의 비교 정보를 읽을 수 없습니다. 현재 정보와 원문을 확인하세요.</p>';
+  return `<section class="review-comparison" data-review-comparison>
+    <h3>재검토 사유 · 완료 당시와 현재</h3>
+    ${times.length ? `<p class="review-baseline">${escape(times.join(' · '))}</p>` : ''}
+    ${content}
+    ${!rows.length && events.length ? `<details><summary>완료 이후 수집 변경 이력</summary>
+      ${events.map((event) => `<div><small>변경 감지 ${escape(date(event.at))}</small>${changeDetails(event)}</div>`).join('')}
+    </details>` : ''}
+    <div class="version-sources">${sources.join(' ')}</div>
+  </section>`;
+}
+
 function cveHistory(item) {
   const events = (data.history || []).filter((event) => event.id === item.id);
   if (!events.length) return '';
@@ -587,6 +658,7 @@ function renderInspector(panel = $('#inspector'), item = selected) {
     panel.innerHTML = '<p class="empty">표시할 CVE가 없습니다.</p>';
     return;
   }
+  const state = reviewState(item);
   panel.innerHTML = `
     <div class="eyebrow"><span>${escape(item.id)}</span>${item.kev === true ? '<span class="pill critical">KEV 등재</span>' : ''}</div>
     <h2 tabindex="-1">${escape(item.title)}</h2>
@@ -598,13 +670,13 @@ function renderInspector(panel = $('#inspector'), item = selected) {
     ${installedVersionCheck(item)}
     <div class="review-control">
       <label>내 점검 상태 <select data-review-state aria-label="내 점검 상태">
-        ${reviewState(item) === 'recheck' ? '<option value="recheck" selected disabled>재검토 필요</option>' : ''}
-        ${['unreviewed', 'investigate', 'done'].map((state) =>
-          `<option value="${state}" ${reviewState(item) === state ? 'selected' : ''}>${reviewLabels[state]}</option>`).join('')}
+        ${state === 'recheck' ? '<option value="recheck" selected disabled>재검토 필요</option>' : ''}
+        ${['unreviewed', 'investigate', 'done'].map((option) =>
+          `<option value="${option}" ${state === option ? 'selected' : ''}>${reviewLabels[option]}</option>`).join('')}
       </select></label>
-      <span class="review-note"${reviewState(item) === 'recheck' ? '' : ' hidden'}>완료 처리 후 패치·완화 정보가 변경됐습니다.</span>
       <span class="review-save" role="status"></span>
     </div>
+    ${reviewComparison(item, state)}
     ${metricFreshness(item)}
     <div class="actions triage-actions">
       <button class="outline" data-guide="check">${icon('shield')}안전한 점검</button>
@@ -903,11 +975,15 @@ function updateReview(event, item) {
   if (state === 'unreviewed') delete preferences.reviews[item.id];
   else preferences.reviews[item.id] = {
     state, reviewedThrough:data.updatedAt, fingerprint:remediationFingerprint(item),
+    ...(state === 'done' ? {completedAt:new Date().toISOString()} : {}),
   };
   savePreferences();
   control.querySelector('option[value="recheck"]')?.remove();
-  control.parentElement.parentElement.querySelector('.review-note').hidden = true;
-  control.parentElement.parentElement.querySelector('.review-save').textContent =
+  const reviewControl = control.closest('.review-control');
+  const oldComparison = reviewControl.nextElementSibling;
+  if (oldComparison?.hasAttribute('data-review-comparison')) oldComparison.remove();
+  reviewControl.insertAdjacentHTML('afterend', reviewComparison(item, state));
+  reviewControl.querySelector('.review-save').textContent =
     canSavePreferences ? '점검 상태를 저장했습니다.' : '브라우저 저장을 사용할 수 없습니다. 현재 탭에서만 적용됩니다.';
   if (page === 'cve' && view === 'recheck') {
     renderRows();

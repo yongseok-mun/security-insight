@@ -252,7 +252,7 @@ dialog code { overflow-wrap: anywhere; }
 .watch-row > small { color:var(--pink); }
 .review-control { display:flex; flex-wrap:wrap; align-items:center; gap:5px 10px; margin:9px 0; }
 .review-control select { width:auto; margin-left:4px; }
-.review-note, .review-save { font-size:12px; color:var(--muted); }
+.review-save { font-size:12px; color:var(--muted); }
 .review-recheck { color:#f5bd7c; border-color:#855529; }
 .review-done { color:#acdfbb; border-color:#486e53; }
 @media(max-width:640px) {
@@ -281,3 +281,26 @@ dialog code { overflow-wrap: anywhere; }
 .version-fields input { min-height:38px; border:1px solid #404049; border-radius:6px; background:var(--surface); padding:6px 9px; }
 .version-check button { border:1px solid #78485e; border-radius:5px; padding:6px 10px; background:#32212e; color:#ffc3d8; min-height:38px; }
 .version-check button:hover { background:#402834; }
+
+.review-comparison {
+  margin:8px 0 12px;
+  padding:10px 12px;
+  border:1px solid #63503b;
+  border-left:3px solid #f5bd7c;
+  border-radius:5px;
+  background:#211c1b;
+}
+.inspector .review-comparison h3 { margin:0 0 4px; }
+.review-baseline, .review-difference-heading small { color:var(--muted); font-size:12px; }
+.review-baseline { margin:4px 0 8px; }
+.review-comparison > details { margin:8px 0; }
+.review-comparison > details > div { margin-top:8px; }
+.review-difference { margin:8px 0; }
+.review-difference-heading { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 10px; }
+.review-difference dl { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px; margin:4px 0 0; }
+.review-difference dl > div { padding:6px 8px; background:var(--surface); border:1px solid var(--line); border-radius:4px; }
+.review-difference dt { font-size:12px; font-weight:650; color:var(--muted); }
+.review-difference dd { margin:3px 0 0; overflow-wrap:anywhere; }
+@media(max-width:480px) {
+  .review-difference dl { grid-template-columns:1fr; }
+}

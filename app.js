@@ -587,7 +587,13 @@ async function translateDescription(button, item) {
   let translator;
   try {
     translator = await Translator.create({sourceLanguage:'en', targetLanguage:'ko'});
-    const translated = await translator.translate(item.descriptionEn || item.description);
+    const source = item.descriptionEn || item.description;
+    const translated = (await translator.translate(source)).trim();
+    if (!validBrowserTranslation(source, translated)) {
+      answer.textContent = '원문의 버전·경로·기술 용어를 확인해야 합니다. 아래 영문 원문을 참고하세요.';
+      button.disabled = false;
+      return;
+    }
     answer.textContent = translated;
     button.textContent = '기계 번역 · 원문 대조 필요';
   } catch {
@@ -1011,6 +1017,23 @@ const advisoryTypes = [
 ];
 
 const containsKorean = (value) => /[가-힣]{2}/.test(value || '');
+const advisoryCodeIdentifiers = /(?<![\w/])(?:\/[A-Za-z0-9_.:-]+){2,}\b|\b[A-Za-z0-9]+(?:_[A-Za-z0-9]+)+\b|\b[A-Za-z_]\w*::[A-Za-z_]\w*\b|\b[\w-]+\.(?:php|sh|js|xml|conf)\b/g;
+const advisoryTerms = [
+  [/privilege escalation|\bLPE\b/i, /권한|\bLPE\b/i],
+  [/\bcommands?\b/i, /명령|커맨드/],
+  [/\b(?:authentication|authorization)\b/i, /인증|인가|권한/],
+  [/\b(?:vulnerable|vulnerability)\b/i, /취약|보안 결함/],
+  [/\b(?:as root|root privileges|root access)\b/i, /root|루트|관리자/i],
+];
+
+function validBrowserTranslation(source, translated) {
+  const numbers = (text) => (text.match(/\d+(?:\.\d+)*/g) || []).sort().join(' ');
+  const identifiers = source.match(advisoryCodeIdentifiers) || [];
+  return containsKorean(translated) && numbers(source) === numbers(translated)
+    && identifiers.every((identifier) => translated.includes(identifier))
+    && advisoryTerms.every(([english, korean]) => !english.test(source) || korean.test(translated));
+}
+
 const koreanText = (source, translations) => containsKorean(source) ? source : translations.get(source);
 const englishDescription = (item) => item.descriptionEn || item.description;
 const publishedAdvisoryTranslations = (item) =>
@@ -1247,7 +1270,7 @@ advisoryDialog.querySelector('[data-translate-advisory]').addEventListener('clic
       if (advisoryDraft !== draft) return;
       if (draft.translations.has(source)) continue;
       const translated = (await translator.translate(source)).trim();
-      if (containsKorean(translated)) draft.translations.set(source, translated);
+      if (validBrowserTranslation(source, translated)) draft.translations.set(source, translated);
     }
     if (advisoryDraft !== draft) return;
     updateAdvisory();

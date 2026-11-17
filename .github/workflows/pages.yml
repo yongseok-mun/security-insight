@@ -61,7 +61,8 @@ jobs:
         run: |
           mkdir -p .feed-cache _site
           cp data.json .feed-cache/data.json
-          cp index.html style.css app.js data.json _site/
+          cp debian-packages.json .feed-cache/debian-packages.json
+          cp index.html style.css app.js data.json debian-packages.json _site/
       - uses: actions/cache/save@v4
         with:
           path: .feed-cache

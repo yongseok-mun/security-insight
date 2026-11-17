@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="CVE 우선순위, 영향 범위, 안전한 점검과 출처를 한 화면에서 확인하는 보안 인텔리전스 대시보드">
+<title>Security Insight</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<aside class="sidebar">
+  <div class="brand"><span data-icon="shield"></span><span>Security<br>Insight</span></div>
+  <nav aria-label="보안 인텔리전스">
+    <button data-page="news"><span data-icon="news"></span>실시간 뉴스</button>
+    <button data-page="issues"><span data-icon="flame"></span>핵심 이슈</button>
+    <button data-page="korea"><span data-icon="chart"></span>국내 동향</button>
+    <button data-page="cve" aria-current="page"><span data-icon="shield"></span>CVE</button>
+    <button data-page="dark"><span data-icon="user"></span>다크웹</button>
+  </nav>
+</aside>
+<main>
+  <section class="priority" aria-labelledby="priority-title">
+    <h1 id="priority-title">오늘 먼저 확인할 항목</h1>
+    <div class="priority-content">
+      <div class="hero-metrics"><div>CVSS<strong>9.8</strong></div><div>EPSS<strong>82%</strong></div></div>
+      <ul><li>외부 노출 게이트웨이 확인</li><li>KEV 등재 · 인증 우회</li><li>외부 노출 자산과 설치 버전 대조</li></ul>
+      <div class="actions"><button class="accent" id="top-check"><span data-icon="shield"></span>안전한 점검</button><button class="outline" id="top-source"><span data-icon="link"></span>출처 확인</button></div>
+    </div>
+  </section>
+  <section id="workspace" aria-labelledby="page-title">
+    <header class="page-heading"><h2 id="page-title">CVE 우선순위</h2><span class="demo">시안 데이터</span><time datetime="2026-11-17">2026.11.17 KST</time></header>
+    <div id="cve-view">
+      <form id="filters" aria-label="CVE 검색 및 필터">
+        <label class="search"><span data-icon="search"></span><input id="query" type="search" aria-label="CVE 검색" placeholder="CVE 검색 (취약점 키워드, 제품명, 버전)"></label>
+        <label class="kev-control"><input id="kev" type="checkbox">KEV 등재만 보기</label>
+        <select id="product" aria-label="제품"></select><select id="vendor" aria-label="벤더"></select><select id="version" aria-label="버전"></select>
+      </form>
+      <div class="workspace-grid">
+        <section class="panel results" aria-label="CVE 목록">
+          <table>
+            <thead><tr><th scope="col">취약점</th><th scope="col"><button data-sort="cvss">CVSS <span></span></button></th><th scope="col"><button data-sort="epss">EPSS <span></span></button></th><th scope="col"><button data-sort="kev">KEV <span></span></button></th></tr></thead>
+            <tbody id="rows"></tbody>
+          </table>
+          <footer id="count" aria-live="polite"></footer>
+        </section>
+        <section class="panel inspector" id="inspector" aria-label="선택한 CVE 상세"></section>
+      </div>
+    </div>
+    <section class="panel feed" id="feed" hidden></section>
+  </section>
+</main>
+<dialog id="guide" aria-labelledby="guide-title">
+  <form method="dialog" class="close"><button aria-label="닫기">×</button></form>
+  <div id="guide-content"></div>
+</dialog>
+</body>
+</html>

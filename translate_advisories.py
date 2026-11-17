@@ -11,9 +11,8 @@ import time
 from collect import clean
 
 ROOT = Path(__file__).resolve().parent
-MODEL = 'Helsinki-NLP/opus-mt-tc-big-en-ko'
-REVISION = 'ae8606b7b29a495f31ce679cee2007f536a3a5ce'
-TOKENIZER_REVISION = '67b328077e6187b0078311212427d0b6c5d9683a'
+MODEL = 'Neurora/opus-hplt-en-ko-v2.0'
+REVISION = '06f3f7b03a97728560826d7387e1ea25224c65a9'
 HANGUL = re.compile(r'[가-힣]{2}')
 NUMBERS = re.compile(r'\d+(?:\.\d+)*')
 TECHNICAL_TERMS = {
@@ -40,7 +39,7 @@ def advisory_sources(item):
 
 
 def source_key(text):
-    return hashlib.sha256(f'{REVISION}:{TOKENIZER_REVISION}:{text}'.encode('utf-8')).hexdigest()
+    return hashlib.sha256(f'{MODEL}:{REVISION}:{text}'.encode('utf-8')).hexdigest()
 
 
 def valid_translation(source, translated):
@@ -56,8 +55,7 @@ def translate(sources):
 
     deadline = time.monotonic() + 150
     torch.set_num_threads(2)
-    # The released checkpoint requires separate source and target vocabularies.
-    tokenizer = AutoTokenizer.from_pretrained(MODEL, revision=TOKENIZER_REVISION)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL, revision=REVISION)
     model = AutoModelForSeq2SeqLM.from_pretrained(MODEL, revision=REVISION, use_safetensors=True).eval()
     canary = 'An attacker can execute arbitrary commands.'
     with torch.inference_mode():
@@ -121,7 +119,7 @@ def enrich(snapshot, previous, translator=translate):
         translations = [[text, cache[hashes[text]]] for text in texts if cache.get(hashes[text])]
         if translations:
             record['advisoryKo'] = translations
-            record['advisoryKoRevision'] = TOKENIZER_REVISION
+            record['advisoryKoRevision'] = REVISION
         else:
             record.pop('advisoryKo', None)
             record.pop('advisoryKoRevision', None)

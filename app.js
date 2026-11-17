@@ -1014,7 +1014,7 @@ const containsKorean = (value) => /[가-힣]{2}/.test(value || '');
 const koreanText = (source, translations) => containsKorean(source) ? source : translations.get(source);
 const englishDescription = (item) => item.descriptionEn || item.description;
 const publishedAdvisoryTranslations = (item) =>
-  item.advisoryKoRevision === '67b328077e6187b0078311212427d0b6c5d9683a' ? item.advisoryKo || [] : [];
+  item.advisoryKoRevision === '06f3f7b03a97728560826d7387e1ea25224c65a9' ? item.advisoryKo || [] : [];
 
 function advisoryChanges(comparison) {
   if (!comparison) return [];
@@ -1130,7 +1130,7 @@ function advisoryText(item, {comparison, version, translations = new Map()} = {}
     ...(item.kev === true ? [`- CISA KEV: https://www.cisa.gov/known-exploited-vulnerabilities-catalog?search_api_fulltext=${encodeURIComponent(item.id)}`] : []),
     `- Security Insight 상세: ${cveUrl(item.id)}`,
     ...(publishedTranslations.length ? [
-      '- 배포 전 기계 번역: Helsinki-NLP OPUS-MT (CC BY 4.0) https://huggingface.co/Helsinki-NLP/opus-mt-tc-big-en-ko',
+      '- 배포 전 기계 번역: HPLT·OPUS, Neurora 변환 모델 (CC BY 4.0) https://huggingface.co/Neurora/opus-hplt-en-ko-v2.0',
       '- 기계 번역된 설명과 조치 문장은 배포 전 벤더 원문과 대조해 주세요.',
     ] : []),
   ].join('\n');

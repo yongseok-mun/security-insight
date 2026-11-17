@@ -65,12 +65,83 @@ let view = 'latest';
 const newest = (a, b) => (Date.parse(b.published) || 0) - (Date.parse(a.published) || 0)
   || a.id.localeCompare(b.id);
 
+const preferenceKey = 'security-insight.preferences.v1';
+const reviewLabels = {unreviewed:'미확인', investigate:'영향 확인 필요', done:'조치 완료', recheck:'재검토 필요'};
+let canSavePreferences = true;
+
+function readPreferences() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(preferenceKey) || '{}');
+    return {
+      products: Array.isArray(stored.products) ? stored.products.filter((name) => typeof name === 'string') : [],
+      reviews: stored.reviews && typeof stored.reviews === 'object' ? stored.reviews : {},
+    };
+  } catch {
+    return {products:[], reviews:{}};
+  }
+}
+
+const preferences = readPreferences();
+
+function savePreferences() {
+  try {
+    localStorage.setItem(preferenceKey, JSON.stringify(preferences));
+    canSavePreferences = true;
+  } catch {
+    canSavePreferences = false;
+  }
+}
+
+const normalizeProduct = (value) => String(value || '').normalize('NFKC').toLowerCase()
+  .replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+const productAliases = {
+  'linux kernel':['linux kernel','kernel linux','linux linux'],
+  'nginx':['nginx','nginx plus','nginx ingress controller'],
+  'fortinet':['fortinet','fortios','fortiproxy','fortimanager','fortianalyzer','forticlient','fortiweb'],
+  'openssl':['openssl','open ssl'],
+};
+const matchesProduct = (item, product) => {
+  const name = normalizeProduct(product);
+  const names = productAliases[name] || [name];
+  const metadata = (item.cna?.affected || []).flatMap(({vendor, product: affected}) =>
+    [vendor, affected, [vendor, affected].filter(Boolean).join(' ')]);
+  const searchable = [item.product, ...metadata].filter(Boolean);
+  const labels = (searchable.length ? searchable : [item.title]).map((value) => ` ${normalizeProduct(value)} `);
+  return names.some((alias) => alias && labels.some((label) => label.includes(` ${alias} `)));
+};
+const watched = (item) => preferences.products.some((product) => matchesProduct(item, product));
+
+function remediationFingerprint(item) {
+  return JSON.stringify([
+    [...new Set([...(item.fixes || []), ...(item.describedFixes || [])])].sort(),
+    [...new Set(item.cna?.solutions || [])].sort(),
+    [...new Set(item.cna?.workarounds || [])].sort(),
+    item.requiredAction || '',
+  ]);
+}
+
+function reviewState(item) {
+  const review = preferences.reviews[item.id];
+  if (review?.state === 'investigate') return 'investigate';
+  if (review?.state !== 'done') return 'unreviewed';
+  const changed = (data.history || []).some((event) => event.id === item.id && event.type === 'remediation'
+    && Date.parse(event.at) > Date.parse(review.reviewedThrough));
+  return changed || review.fingerprint !== remediationFingerprint(item) ? 'recheck' : 'done';
+}
+
+function reviewBadge(item) {
+  const state = reviewState(item);
+  return `<span class="pill review-badge review-${state}">${reviewLabels[state]}</span>`;
+}
+
 function rowsForFilters() {
   const terms = $('#query').value.trim().toLowerCase().split(/\s+/).filter(Boolean);
   const product = $('#product').value;
   const rows = data.cves.filter((item) => {
     const text = [item.id, item.title, item.product, ...item.fixes, item.description].join(' ').toLowerCase();
     return terms.every((term) => text.includes(term)) && (!product || item.product === product)
+      && (view !== 'watch' || watched(item))
+      && (view !== 'recheck' || reviewState(item) === 'recheck')
       && (view !== 'kev' || item.kev === true)
       && (view !== 'critical' || item.cvss >= 9)
       && (view !== 'epss' || item.epss != null);
@@ -146,6 +217,7 @@ function renderRows() {
           <span class="pill ${severity}">CVSS ${cvss(item)}</span>
           ${item.kev === true ? '<span class="pill kev">KEV</span>' : ''}
           ${item.fixes.length ? '<span class="pill fix">수정 버전</span>' : ''}
+          ${reviewState(item) !== 'unreviewed' ? reviewBadge(item) : ''}
           ${view === 'epss' ? `<span class="pill">EPSS ${epss(item)}</span>` : ''}
           ${item.published ? `<time datetime="${escape(item.published)}">${escape(date(item.published))}</time>` : ''}
         </span>
@@ -338,6 +410,15 @@ function renderInspector(panel = $('#inspector'), item = selected) {
       <div>EPSS<strong>${epss(item)}</strong></div><div>KEV<strong>${kev(item)}</strong></div>
     </div>
     ${actionSummary(item)}
+    <div class="review-control">
+      <label>내 점검 상태 <select data-review-state aria-label="내 점검 상태">
+        ${reviewState(item) === 'recheck' ? '<option value="recheck" selected disabled>재검토 필요</option>' : ''}
+        ${['unreviewed', 'investigate', 'done'].map((state) =>
+          `<option value="${state}" ${reviewState(item) === state ? 'selected' : ''}>${reviewLabels[state]}</option>`).join('')}
+      </select></label>
+      <span class="review-note"${reviewState(item) === 'recheck' ? '' : ' hidden'}>완료 처리 후 패치·완화 정보가 변경됐습니다.</span>
+      <span class="review-save" role="status"></span>
+    </div>
     ${metricFreshness(item)}
     <div class="actions triage-actions">
       <button class="outline" data-guide="check">${icon('shield')}안전한 점검</button>
@@ -410,6 +491,47 @@ function overviewHistory() {
   return `<section class="digest digest-cve recent-changes"><h3>최근 7일 변경 이력</h3>${groups.join('')}</section>`;
 }
 
+function watchBriefing() {
+  const matched = data.cves.filter(watched);
+  const eventsById = new Map();
+  for (const event of data.history || []) {
+    if (!eventsById.has(event.id)) eventsById.set(event.id, []);
+    eventsById.get(event.id).push(event);
+  }
+  const count = (state) => matched.filter((item) => reviewState(item) === state).length;
+  const wasPublished = (item) => eventsById.get(item.id)?.some((event) => event.type === 'published');
+  const ordered = matched.sort((a, b) => Number(reviewState(b) === 'recheck') - Number(reviewState(a) === 'recheck')
+    || (Date.parse(eventsById.get(b.id)?.[0]?.at) || 0) - (Date.parse(eventsById.get(a.id)?.[0]?.at) || 0)
+    || comparePriority(a, b));
+  const suggested = [...new Set(['Linux Kernel', 'NGINX', 'Fortinet', 'OpenSSL', ...data.cves.map((item) => item.product).filter(Boolean)])];
+  return `<section class="digest digest-cve watch-briefing">
+    <header><h3>관심 제품 브리핑</h3>${matched.length ? '<button type="button" data-open-view="watch">관심 CVE 전체 →</button>' : ''}</header>
+    <form id="watch-form">
+      <label for="watch-name">관심 제품</label>
+      <input id="watch-name" name="product" required maxlength="70" list="watch-suggestions" placeholder="예: Linux Kernel">
+      <datalist id="watch-suggestions">${suggested.map((name) => `<option value="${escape(name)}"></option>`).join('')}</datalist>
+      <button type="submit" class="utility">등록</button>
+    </form>
+    <div class="watch-tags">${preferences.products.map((name, index) =>
+      `<button type="button" class="pill" data-remove-watch="${index}" aria-label="${escape(name)} 삭제">${escape(name)} <span aria-hidden="true">×</span></button>`).join('')}</div>
+    <p class="watch-feedback" role="status"></p>
+    ${preferences.products.length ? `<div class="watch-counts">
+      <span>신규 공개 <strong>${matched.filter(wasPublished).length}</strong></span>
+      <span>미확인 <strong>${count('unreviewed')}</strong></span>
+      <span>영향 확인 필요 <strong>${count('investigate')}</strong></span>
+      <span>재검토 필요 <strong>${count('recheck')}</strong></span>
+    </div>
+    ${ordered.slice(0, 8).map((item) => {
+      const events = [...new Set((eventsById.get(item.id) || []).map((event) => historyTypes[event.type]).filter(Boolean))];
+      return `<button type="button" class="watch-row" data-cve="${escape(item.id)}">
+        <small>${escape(item.id)}</small><span>${escape(item.title)}</span>
+        <span class="watch-badges">${events.map((label) => `<span class="pill">${escape(label)}</span>`).join('')}${reviewBadge(item)}</span>
+      </button>`;
+    }).join('') || '<p class="feed-note">현재 수집 목록에 일치하는 CVE가 없습니다.</p>'}`
+    : '<p class="feed-note">담당 제품의 신규 CVE·KEV 등재·패치 변경을 모아볼 수 있습니다. 관심 제품과 점검 상태는 이 브라우저에 저장됩니다.</p>'}
+  </section>`;
+}
+
 function renderOverview() {
   const sections = [
     ['issues', '핵심 이슈', data.news.filter((article) => article.kind === 'advisory' || article.cves.length)],
@@ -418,7 +540,7 @@ function renderOverview() {
     ['dark', '다크웹 보도', data.news.filter((article) => article.dark)],
   ];
   const view = $('#overview');
-  view.innerHTML = overviewHistory() + sections.map(([target, title, articles]) => `
+  view.innerHTML = watchBriefing() + overviewHistory() + sections.map(([target, title, articles]) => `
     <section class="digest">
       <header><h3>${title}</h3><button data-open="${target}">전체 보기 <span aria-hidden="true">→</span></button></header>
       ${articles.slice(0, 4).map((article) => newsArticle(article, 'h4')).join('') || '<p>수집된 항목 없음</p>'}
@@ -579,7 +701,73 @@ function openCve(id) {
   $('#inspector h2')?.focus();
 }
 
+function updateReview(event, item) {
+  const control = event.target.closest('[data-review-state]');
+  if (!control || !item || !['unreviewed', 'investigate', 'done'].includes(control.value)) return;
+  const state = control.value;
+  if (state === 'unreviewed') delete preferences.reviews[item.id];
+  else preferences.reviews[item.id] = {
+    state, reviewedThrough:data.updatedAt, fingerprint:remediationFingerprint(item),
+  };
+  savePreferences();
+  control.querySelector('option[value="recheck"]')?.remove();
+  control.parentElement.parentElement.querySelector('.review-note').hidden = true;
+  control.parentElement.parentElement.querySelector('.review-save').textContent =
+    canSavePreferences ? '점검 상태를 저장했습니다.' : '브라우저 저장을 사용할 수 없습니다. 현재 탭에서만 적용됩니다.';
+  if (page === 'cve' && view === 'recheck') {
+    renderRows();
+    $('[data-view="recheck"]').focus();
+    return;
+  }
+  const row = [...document.querySelectorAll('.cve-row')].find((entry) => entry.dataset.id === item.id);
+  if (row) {
+    row.querySelector('.review-badge')?.remove();
+    if (state !== 'unreviewed') row.querySelector('.cve-meta').insertAdjacentHTML('beforeend', reviewBadge(item));
+  }
+  if (page === 'home') renderOverview();
+}
+
+$('#inspector').addEventListener('change', (event) => updateReview(event, selected));
+$('#priority-inspector').addEventListener('change', (event) =>
+  updateReview(event, priorities.find((item) => item.id === prioritySelection)));
+
+$('#overview').addEventListener('submit', (event) => {
+  if (event.target.id !== 'watch-form') return;
+  event.preventDefault();
+  const input = $('#watch-name');
+  const name = input.value.trim().replace(/\s+/g, ' ');
+  const normalized = normalizeProduct(name);
+  if (normalized.length < 2 || preferences.products.some((entry) => normalizeProduct(entry) === normalized)) {
+    $('.watch-feedback').textContent = normalized.length < 2 ? '제품명을 두 글자 이상 입력하세요.' : '이미 등록된 제품입니다.';
+    return;
+  }
+  preferences.products.push(name);
+  savePreferences();
+  renderOverview();
+  $('.watch-feedback').textContent = canSavePreferences ? `${name} 등록 완료` : '이 탭에 임시로 등록했습니다. 브라우저 저장을 사용할 수 없습니다.';
+  $('#watch-name').focus();
+});
+
 $('#overview').addEventListener('click', (event) => {
+  const remove = event.target.closest('[data-remove-watch]');
+  if (remove) {
+    preferences.products.splice(Number(remove.dataset.removeWatch), 1);
+    savePreferences();
+    renderOverview();
+    $('#watch-name').focus();
+    return;
+  }
+  const openView = event.target.closest('[data-open-view]');
+  if (openView) {
+    $('#filters').reset();
+    $('#cve-link-status').hidden = true;
+    selected = null;
+    view = openView.dataset.openView;
+    showPage('cve');
+    renderRows();
+    $('#query').focus();
+    return;
+  }
   const section = event.target.closest('[data-open]');
   if (section) showPage(section.dataset.open);
   const item = event.target.closest('[data-cve]');

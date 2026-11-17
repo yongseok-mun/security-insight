@@ -149,6 +149,7 @@ dialog code { overflow-wrap: anywhere; }
 .priority-row:hover { background:#232129; }
 .priority-copy > span, .priority-copy strong { display:block; overflow-wrap:anywhere; }
 .priority-copy strong { font-weight:550; }
+.priority-copy .priority-reason { display:block; color:var(--muted); font-size:12px; margin-top:3px; }
 .priority-detail { color:var(--pink); font-size:12px; white-space:nowrap; }
 .cve-summary { color:var(--muted); overflow-wrap:anywhere; }
 .news-toolbar { display:flex; flex-wrap:wrap; gap:8px 12px; align-items:center; }
@@ -173,6 +174,8 @@ dialog code { overflow-wrap: anywhere; }
 .update-progress span { display:block; height:100%; width:0; background:#b76487; transition:width .85s linear; }
 #refresh-note { margin:0; color:var(--muted); font-size:12px; }
 #refresh-note:empty { display:none; }
+.utility.apply-update { border-color:var(--pink); color:var(--text); }
+.pending-update { border-left:2px solid var(--pink); padding:5px 30px 5px 9px; font-size:13px; }
 .priority-row[aria-expanded="true"] { background:#29242c; }
 .priority-detail span { display:inline-block; transition:transform .18s ease; }
 .priority-row[aria-expanded="true"] .priority-detail span { transform:rotate(180deg); }

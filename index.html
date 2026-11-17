@@ -5,12 +5,12 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="description" content="CVE 우선순위, 영향 범위, 안전한 점검과 출처를 한 화면에서 확인하는 보안 인텔리전스 대시보드">
 <title>Security Insight</title>
-<link rel="stylesheet" href="style.css?v=reliability-23">
+<link rel="stylesheet" href="style.css?v=briefing-24">
 <style>
   .brand-text { display: flex; flex-direction: column; line-height: 1.3; }
   .brand-text small { color: var(--muted); font-size: 11px; font-weight: 500; }
 </style>
-<script src="app.js?v=reliability-23" defer></script>
+<script src="app.js?v=briefing-24" defer></script>
 </head>
 <body>
 <header class="site-header"><div class="header-content">
@@ -32,6 +32,7 @@
     </div>
     <div class="status-actions">
       <button class="utility refresh" id="refresh-data" type="button">새 데이터 확인</button>
+      <button class="utility apply-update" id="apply-update" type="button" hidden>새 데이터 반영</button>
       <button class="utility" id="open-email" type="button" disabled>HTML 메일 작성</button>
     </div>
     <div class="update-progress" aria-hidden="true"><span id="update-progress"></span></div>
@@ -77,10 +78,12 @@
 </main>
 <dialog id="guide" aria-labelledby="guide-title">
   <form method="dialog" class="close"><button aria-label="닫기">×</button></form>
+  <p data-pending-update class="pending-update" role="status" hidden>새 데이터가 준비됐습니다. 이 창을 닫은 뒤 상단에서 반영할 수 있습니다.</p>
   <div id="guide-content"></div>
 </dialog>
 <dialog id="debian-dialog" aria-labelledby="debian-title">
   <form method="dialog" class="close"><button aria-label="닫기">×</button></form>
+  <p data-pending-update class="pending-update" role="status" hidden>새 데이터가 준비됐습니다. 이 창을 닫은 뒤 상단에서 반영할 수 있습니다.</p>
   <h2 id="debian-title">Debian 패키지 조회</h2>
   <form id="debian-lookup">
     <label>CVE ID <input name="cve" required pattern="[Cc][Vv][Ee]-[0-9]{4}-[0-9]{4,}" placeholder="CVE-2026-9076" maxlength="30"></label>
@@ -91,6 +94,7 @@
 </dialog>
 <dialog id="advisory-dialog" aria-labelledby="advisory-title">
   <form method="dialog" class="close"><button aria-label="닫기">×</button></form>
+  <p data-pending-update class="pending-update" role="status" hidden>새 데이터가 준비됐습니다. 이 창을 닫은 뒤 상단에서 반영할 수 있습니다.</p>
   <h2 id="advisory-title">보안공지문 생성</h2>
   <p>사내 정보와 본문을 편집한 뒤 복사하거나 HTML로 내려받으세요.</p>
   <p data-offline-draft class="feed-note" hidden>현재 수집 목록에서 빠진 CVE입니다. 게시 전에 원문에서 최신 정보를 확인하세요.</p>
@@ -135,6 +139,7 @@
 </dialog>
 <dialog id="email-dialog" aria-labelledby="email-title">
   <form method="dialog" class="close"><button aria-label="닫기">×</button></form>
+  <p data-pending-update class="pending-update" role="status" hidden>새 데이터가 준비됐습니다. 이 창을 닫은 뒤 상단에서 반영할 수 있습니다.</p>
   <h2 id="email-title">HTML 메일 작성</h2>
   <p id="email-scope"></p>
   <form id="email-form">

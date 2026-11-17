@@ -61,6 +61,8 @@ let selected;
 let archiveMatch;
 let archivePromise;
 let priorities = [];
+let priorityReasons = new Map();
+let pendingSnapshot;
 let newsMode = 'recent';
 let mailDraft;
 let prioritySelection = null;
@@ -186,6 +188,60 @@ function rowsForFilters() {
   return rows.sort(newest);
 }
 
+const koreaDay = new Intl.DateTimeFormat('sv-SE', {
+  timeZone:'Asia/Seoul', year:'numeric', month:'2-digit', day:'2-digit',
+});
+
+function briefingPriority(snapshot, isWatched = watched) {
+  const asOf = Date.parse(snapshot.updatedAt);
+  const endDay = Date.parse(koreaDay.format(asOf));
+  const recent = (value) => {
+    const stamp = Date.parse(value);
+    if (!Number.isFinite(stamp)) return false;
+    const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(value);
+    const day = dateOnly ? stamp : Date.parse(koreaDay.format(stamp));
+    return (dateOnly || stamp <= asOf) && day <= endDay && endDay - day < 7 * 86400000;
+  };
+  const changed = new Map();
+  for (const event of snapshot.history || []) {
+    if (event.type !== 'remediation' || !recent(event.at)) continue;
+    const stamp = Date.parse(event.at);
+    changed.set(event.id, Math.max(changed.get(event.id) || 0, stamp));
+  }
+  const ranked = snapshot.cves.map((item) => {
+    const newKev = item.kev === true && recent(item.kevDate);
+    const watchedProduct = isWatched(item);
+    const watchChange = watchedProduct ? changed.get(item.id) : undefined;
+    const network = cvssMetrics(item).AV === 'N';
+    const rank = newKev ? 0 : watchChange ? 1 : watchedProduct && network ? 2 : 3;
+    const reasons = [
+      newKev ? `최근 KEV 등재 (${item.kevDate.slice(5, 10).replace('-', '.')})` : '',
+      watchChange ? '관심 제품의 조치 정보 변경' : watchedProduct ? '관심 제품' : '',
+      network ? '네트워크 접근 조건 · 외부 노출 확인' : '',
+    ].filter(Boolean);
+    if (!newKev && !watchChange && !(watchedProduct && network)) {
+      reasons.unshift(item.kev === true ? '기존 KEV 등재' : '공개 위험 지표 기준');
+    }
+    const sortDate = newKev ? Date.parse(item.kevDate) : watchChange || 0;
+    return {item, rank, sortDate, watchChange, reason:reasons.join(' · ')};
+  }).sort((a, b) => a.rank - b.rank || b.sortDate - a.sortDate
+    || Number(b.item.kev === true) - Number(a.item.kev === true)
+    || (b.item.cvss ?? -1) - (a.item.cvss ?? -1)
+    || (b.item.epssStatus !== 'stale' ? b.item.epss?.score ?? -1 : -1)
+      - (a.item.epssStatus !== 'stale' ? a.item.epss?.score ?? -1 : -1)
+    || newest(a.item, b.item));
+  const top = ranked.slice(0, 3);
+  const watchedChange = ranked.find((entry) => entry.watchChange);
+  if (watchedChange && !top.some((entry) => entry.watchChange)) top[top.length - 1] = watchedChange;
+  return top;
+}
+
+function updatePriorities() {
+  const ranked = briefingPriority(data);
+  priorities = ranked.map(({item}) => item);
+  priorityReasons = new Map(ranked.map(({item, reason}) => [item.id, reason]));
+}
+
 function renderPriority() {
   const panel = $('#priority-inspector');
   const item = priorities.find((entry) => entry.id === prioritySelection);
@@ -196,11 +252,12 @@ function renderPriority() {
   $('#priority-list').innerHTML = priorities.map((entry) => `
     <li><button type="button" class="priority-row" data-cve="${escape(entry.id)}"
       aria-expanded="${entry === item}" aria-controls="priority-inspector">
-      <span class="priority-copy"><span>${escape(entry.id)}</span><strong>${escape(entry.title)}</strong></span>
+      <span class="priority-copy"><span>${escape(entry.id)}</span><strong>${escape(entry.title)}</strong>
+        <small class="priority-reason">${escape(priorityReasons.get(entry.id))}</small></span>
       <span class="cve-meta">
         ${entry.kev === true ? '<span class="pill kev">KEV</span>' : ''}
         <span class="pill">CVSS ${cvss(entry)}</span>
-        <span class="pill">EPSS ${epss(entry)}</span>
+        <span class="pill">EPSS ${epss(entry)}${entry.epssStatus === 'stale' ? ' · 이전' : ''}</span>
       </span>
       <span class="priority-detail">${entry === item ? '상세 닫기' : '상세 보기'} <span aria-hidden="true">⌄</span></span>
     </button></li>`).join('');
@@ -647,9 +704,12 @@ function downloadBatchCsv(button, item) {
 }
 
 function showInstalledVersionResult(event, item) {
-  const form = event.target.closest('[data-version-check]');
-  if (!form) return;
   event.preventDefault();
+  const form = event.target.closest('[data-version-check]');
+  if (form) renderInstalledVersionResult(form, item);
+}
+
+function renderInstalledVersionResult(form, item) {
   const fields = form.elements;
   const product = item?.cna?.affected?.[Number(fields.product.value)];
   if (!product || fields.product.value === '') return;
@@ -1773,6 +1833,15 @@ async function copyCveLink(button, item) {
     input.select();
   }
 }
+function syncBatchFields(form) {
+  const {batch, version, versions} = form.elements;
+  for (const [field, active] of [[version, !batch.checked], [versions, batch.checked]]) {
+    field.required = active;
+    field.disabled = !active;
+    field.closest('label').hidden = !active;
+  }
+}
+
 for (const panel of [$('#inspector'), $('#priority-inspector')]) {
   panel.addEventListener('submit', (event) => {
     const item = panel.id === 'inspector' ? selected : priorities.find((item) => item.id === prioritySelection);
@@ -1789,14 +1858,7 @@ for (const panel of [$('#inspector'), $('#priority-inspector')]) {
     const form = event.target.closest('[data-version-check]');
     if (!form || event.target.matches('[data-batch-filter]')) return;
     form.querySelector('.version-result').hidden = true;
-    if (event.target === form.elements.batch) {
-      const batch = event.target.checked;
-      for (const [field, active] of [[form.elements.version, !batch], [form.elements.versions, batch]]) {
-        field.required = active;
-        field.disabled = !active;
-        field.closest('label').hidden = !active;
-      }
-    }
+    if (event.target === form.elements.batch) syncBatchFields(form);
   });
   panel.addEventListener('change', (event) => {
     if (!event.target.matches('[data-batch-filter]')) return;
@@ -1873,6 +1935,7 @@ $('#overview').addEventListener('submit', (event) => {
   }
   preferences.products.push(name);
   savePreferences();
+  rerankWatchedPriorities();
   renderOverview();
   $('.watch-feedback').textContent = canSavePreferences ? `${name} 등록 완료` : '이 탭에 임시로 등록했습니다. 브라우저 저장을 사용할 수 없습니다.';
   $('#watch-name').focus();
@@ -1891,6 +1954,7 @@ $('#overview').addEventListener('click', (event) => {
   if (remove) {
     preferences.products.splice(Number(remove.dataset.removeWatch), 1);
     savePreferences();
+    rerankWatchedPriorities();
     renderOverview();
     $('#watch-name').focus();
     return;
@@ -2072,47 +2136,158 @@ function openIncomingCve(id) {
   else searchArchivedCve(id, true);
 }
 
+const comparisonForms = '[data-version-check], [data-debian-check]';
+const comparisonPanels = ['#inspector', '#priority-inspector'];
+
+function isComparisonField(field) {
+  if (field.type === 'checkbox') return field.checked;
+  return field.value !== '' && !(['product', 'debianPackage'].includes(field.name) && field.options.length === 1);
+}
+
+function captureComparisons(panelSelector) {
+  const panel = $(panelSelector);
+  if (panel.closest('[hidden]')) return [];
+  return [...panel.querySelectorAll(comparisonForms)].map((form) => {
+    const fields = [...form.elements].filter((field) => field.name && isComparisonField(field));
+    return {
+      kind:form.matches('[data-debian-check]') ? '[data-debian-check]' : '[data-version-check]',
+      fields:fields.map((field) => [field.name, field.type === 'checkbox' ? field.checked
+        : ['product', 'debianPackage'].includes(field.name) ? field.selectedOptions[0]?.text : field.value]),
+      product:form.elements.product?.selectedOptions[0]?.text,
+      open:form.closest('details').open,
+      result:!form.querySelector('.version-result').hidden,
+      filter:form.querySelector('[data-batch-filter]')?.value || '',
+    };
+  });
+}
+
+function restoreComparisons(panelSelector, comparisons, item) {
+  if (!item) return;
+  for (const state of comparisons) {
+    const form = $(`${panelSelector} ${state.kind}`);
+    if (!form) continue;
+    form.closest('details').open = state.open;
+    const fields = new Map(state.fields);
+    if (state.product && fields.size) fields.set('product', state.product);
+    let canCompare = true;
+    for (const [name, value] of fields) {
+      const field = form.elements[name];
+      if (field.type === 'checkbox') field.checked = value;
+      else if (['product', 'debianPackage'].includes(name)) {
+        const matches = [...field.options].filter((option) => option.value !== '' && option.text === value);
+        field.value = matches.length === 1 ? matches[0].value : '';
+        canCompare &&= matches.length === 1;
+      } else field.value = value;
+    }
+    if (form.elements.batch) syncBatchFields(form);
+    if (!state.result || !canCompare) continue;
+    if (form.matches('[data-debian-check]')) showDebianVersionResult(form, item);
+    else renderInstalledVersionResult(form, item);
+    const filter = form.querySelector('[data-batch-filter]');
+    if (filter && state.filter) {
+      filter.value = state.filter;
+      filter.dispatchEvent(new Event('change', {bubbles:true}));
+    }
+  }
+}
+
+function rerankWatchedPriorities() {
+  const comparisons = captureComparisons('#priority-inspector');
+  updatePriorities();
+  renderPriority();
+  restoreComparisons('#priority-inspector', comparisons, priorities.find(({id}) => id === prioritySelection));
+}
+
+function updateIsDisruptive() {
+  if ($('dialog[open], #priority:not([hidden]) #priority-list [aria-expanded="true"], #cve-view:not([hidden]) #inspector details[open]')) return true;
+  if ($('#watch-name')?.value.trim()) return true;
+  const active = document.activeElement;
+  if (active?.matches('input, select, textarea, summary')) return true;
+  return comparisonPanels.some((panel) => captureComparisons(panel).some(({fields}) => fields.length > 0));
+}
+
+function showPendingUpdate() {
+  $('#apply-update').hidden = !pendingSnapshot;
+  $('#refresh-note').textContent = pendingSnapshot
+    ? `${date(pendingSnapshot.updatedAt)} 게시 자료가 준비됐습니다. 작업 중인 화면을 유지하고 있습니다.` : '';
+  for (const notice of document.querySelectorAll('[data-pending-update]')) notice.hidden = !pendingSnapshot;
+}
+
+function applySnapshot(snapshot) {
+  const alreadyLoaded = Boolean(data.updatedAt);
+  const currentSelection = selected?.id;
+  const briefingSelection = prioritySelection;
+  const cveComparisons = captureComparisons('#inspector');
+  const priorityComparisons = captureComparisons('#priority-inspector');
+  const watchDraft = $('#watch-name')?.value;
+  const currentProduct = $('#product').value;
+
+  data = snapshot;
+  debianLookupPromise = undefined;
+  archivePromise = undefined;
+  selected = data.cves.find((item) => item.id === currentSelection) || (archiveMatch?.id === currentSelection ? archiveMatch : null);
+  updatePriorities();
+  const stamp = $('#freshness');
+  stamp.dateTime = data.updatedAt;
+  stamp.textContent = date(data.updatedAt);
+  updateClock(data.updatedAt);
+  $('#open-email').disabled = false;
+  showSourceStatus();
+  const products = [...new Set(data.cves.map((item) => item.product).filter(Boolean))].sort();
+  $('#product').replaceChildren(new Option('모든 제품', ''), ...products.map((product) => new Option(product, product)));
+  if (products.includes(currentProduct)) $('#product').value = currentProduct;
+  renderPriority();
+  renderRows();
+  restoreComparisons('#inspector', cveComparisons, selected);
+  restoreComparisons('#priority-inspector', priorityComparisons, priorities.find(({id}) => id === prioritySelection));
+  if (!alreadyLoaded && incomingCve) openIncomingCve(incomingCve);
+  else if (page === 'home') {
+    renderOverview();
+    if (watchDraft) $('#watch-name').value = watchDraft;
+  } else if (page !== 'cve') renderFeed();
+
+  if (page === 'home' && briefingSelection && !prioritySelection
+    && priorityComparisons.some(({fields}) => fields.length)
+    && data.cves.some(({id}) => id === briefingSelection)) {
+    openCve(briefingSelection);
+    restoreComparisons('#inspector', priorityComparisons, selected);
+  }
+}
+
+function receiveSnapshot(snapshot, manual) {
+  const note = $('#refresh-note');
+  const incoming = Date.parse(snapshot.updatedAt);
+  if (!Number.isFinite(incoming)) throw Error('Invalid snapshot timestamp');
+  const newestKnown = pendingSnapshot?.updatedAt || data.updatedAt;
+  if (newestKnown && incoming <= Date.parse(newestKnown)) {
+    if (pendingSnapshot) showPendingUpdate();
+    else if (manual) note.textContent = '현재 최신 데이터를 보고 있습니다.';
+    return;
+  }
+  const alreadyLoaded = Boolean(data.updatedAt);
+  if (alreadyLoaded && (pendingSnapshot || updateIsDisruptive())) {
+    pendingSnapshot = snapshot;
+    showPendingUpdate();
+    return;
+  }
+  applySnapshot(snapshot);
+  if (manual || alreadyLoaded) note.textContent = '새 데이터가 반영됐습니다.';
+}
+
 async function load(manual = false) {
   if (loading) return;
   loading = true;
   const reload = $('#refresh-data');
   const note = $('#refresh-note');
   reload.disabled = true;
-  if (manual) note.textContent = '새 데이터를 확인하고 있습니다.';
+  if (manual && !pendingSnapshot) note.textContent = '새 데이터를 확인하고 있습니다.';
   try {
     const response = await fetch('./data.json', {cache:'no-cache'});
     if (!response.ok) throw Error(`Snapshot HTTP ${response.status}`);
-    const snapshot = await response.json();
-    if (snapshot.updatedAt === data.updatedAt) {
-      if (manual) note.textContent = '현재 최신 데이터를 보고 있습니다.';
-      return;
-    }
-    const alreadyLoaded = Boolean(data.updatedAt);
-    const currentSelection = selected?.id;
-    const currentProduct = $('#product').value;
-    data = snapshot;
-    debianLookupPromise = undefined;
-    archivePromise = undefined;
-    selected = data.cves.find((item) => item.id === currentSelection) || (archiveMatch?.id === currentSelection ? archiveMatch : null);
-    priorities = [...data.cves].sort(comparePriority).slice(0, 3);
-    const stamp = $('#freshness');
-    stamp.dateTime = data.updatedAt;
-    stamp.textContent = date(data.updatedAt);
-    updateClock(data.updatedAt);
-    $('#open-email').disabled = false;
-    showSourceStatus();
-    const products = [...new Set(data.cves.map((item) => item.product).filter(Boolean))].sort();
-    $('#product').replaceChildren(new Option('모든 제품', ''), ...products.map((product) => new Option(product, product)));
-    if (products.includes(currentProduct)) $('#product').value = currentProduct;
-    renderPriority();
-    renderRows();
-    if (!alreadyLoaded && incomingCve) openIncomingCve(incomingCve);
-    else if (page === 'home') renderOverview();
-    else if (page !== 'cve') renderFeed();
-    if (manual || alreadyLoaded) note.textContent = '새 데이터가 반영됐습니다.';
+    receiveSnapshot(await response.json(), manual);
   } catch (error) {
     if (!data.updatedAt) $('#freshness').textContent = '수집 데이터 로딩 실패';
-    if (manual) note.textContent = '갱신을 확인하지 못했습니다. 잠시 후 다시 시도해 주세요.';
+    if (manual && !pendingSnapshot) note.textContent = '갱신을 확인하지 못했습니다. 잠시 후 다시 시도해 주세요.';
     console.error(error);
   } finally {
     reload.disabled = false;
@@ -2120,6 +2295,14 @@ async function load(manual = false) {
   }
 }
 
+$('#apply-update').addEventListener('click', () => {
+  if (!pendingSnapshot || $('dialog[open]')) return;
+  applySnapshot(pendingSnapshot);
+  pendingSnapshot = undefined;
+  showPendingUpdate();
+  $('#refresh-note').textContent = '새 데이터가 반영됐습니다.';
+  $('#refresh-data').focus();
+});
 $('#refresh-data').addEventListener('click', () => load(true));
 load();
 setInterval(() => {

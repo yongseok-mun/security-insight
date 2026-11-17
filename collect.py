@@ -266,7 +266,7 @@ def cna_details(container):
         versions = []
         for entry in product.get('versions', []):
             versions.append({key: entry[key] for key in
-                             ('version', 'lessThan', 'lessThanOrEqual', 'status', 'changes')
+                             ('version', 'versionType', 'lessThan', 'lessThanOrEqual', 'status', 'changes')
                              if key in entry})
         affected.append(dict(
             vendor=clean(product.get('vendor')), product=clean(product.get('product') or product.get('packageName')),
@@ -275,6 +275,7 @@ def cna_details(container):
         ))
     return dict(
         provider=container.get('providerMetadata', {}).get('shortName'),
+        versionTypesCollected=True,
         affected=affected,
         solutions=localized(container, 'solutions', 'ko') or localized(container, 'solutions', 'en'),
         workarounds=localized(container, 'workarounds', 'ko') or localized(container, 'workarounds', 'en'),
@@ -292,7 +293,8 @@ def enrich_cves(records, previous, translations):
             cna = None
             # Keep unchanged records warm for six hours, then recheck editorial revisions.
             last_checked = old.get('cnaChecked')
-            if last_checked and NOW - dt.datetime.fromisoformat(last_checked) < dt.timedelta(hours=6):
+            if (last_checked and (old.get('cna') or {}).get('versionTypesCollected')
+                    and NOW - dt.datetime.fromisoformat(last_checked) < dt.timedelta(hours=6)):
                 item.update({key: old[key] for key in ('cna', 'cnaChecked', 'cnaEnglish', 'cnaKorean', 'cnaTitle') if key in old})
             else:
                 cna = cna_record(item['id'])

@@ -259,3 +259,25 @@ dialog code { overflow-wrap: anywhere; }
   .watch-row { grid-template-columns:auto minmax(0,1fr); }
   .watch-badges { grid-column:1/-1; }
 }
+
+.version-check {
+  border:1px solid #51414f;
+  border-radius:5px;
+  margin:8px 0;
+  padding:9px 12px;
+  background:#1c1820;
+}
+.version-check summary { cursor:pointer; font-weight:650; }
+.version-check form { margin:0; }
+.version-check p { margin:7px 0; overflow-wrap:anywhere; }
+.version-hint, .version-sources { color:var(--muted); font-size:12px; }
+.version-fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px 12px; margin:9px 0; }
+.version-fields label { display:grid; gap:4px; font-size:12px; }
+.version-fields :is(input,select) { min-width:0; width:100%; }
+.version-result { padding:8px 10px; margin-top:10px; border-left:2px solid var(--pink); background:#262029; }
+.version-result strong { font-size:14px; }
+.version-sources { display:flex; flex-wrap:wrap; gap:6px 12px; margin-top:9px; }
+@media(max-width:640px) { .version-fields { grid-template-columns:1fr; } }
+.version-fields input { min-height:38px; border:1px solid #404049; border-radius:6px; background:var(--surface); padding:6px 9px; }
+.version-check button { border:1px solid #78485e; border-radius:5px; padding:6px 10px; background:#32212e; color:#ffc3d8; min-height:38px; }
+.version-check button:hover { background:#402834; }

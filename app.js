@@ -277,6 +277,191 @@ function attackConditions(item) {
   return mapping.flatMap(([key, name, options]) => options[values[key]] ? [`${name} · ${options[values[key]]}`] : []);
 }
 
+const semverPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+
+function parseSemver(value) {
+  const match = semverPattern.exec(value);
+  if (!match) return null;
+  const prerelease = match[4]?.split('.') || [];
+  if (prerelease.some((part) => /^0\d+$/.test(part))) return null;
+  return {core:match.slice(1, 4).map(BigInt), prerelease};
+}
+
+const compare = (a, b) => a === b ? 0 : a < b ? -1 : 1;
+const numericIdentifier = /^\d+$/;
+
+function compareSemver(a, b) {
+  for (let index = 0; index < 3; index++) {
+    const order = compare(a.core[index], b.core[index]);
+    if (order) return order;
+  }
+  if (!a.prerelease.length || !b.prerelease.length) {
+    return compare(!a.prerelease.length, !b.prerelease.length);
+  }
+  for (let index = 0; index < Math.min(a.prerelease.length, b.prerelease.length); index++) {
+    const left = a.prerelease[index];
+    const right = b.prerelease[index];
+    const leftNumeric = numericIdentifier.test(left);
+    const rightNumeric = numericIdentifier.test(right);
+    const order = leftNumeric && rightNumeric ? compare(BigInt(left), BigInt(right))
+      : leftNumeric !== rightNumeric ? compare(rightNumeric, leftNumeric) : compare(left, right);
+    if (order) return order;
+  }
+  return compare(a.prerelease.length, b.prerelease.length);
+}
+
+function compareSemverLimit(version, limit) {
+  if (limit === '*') return -1;
+  if (/^(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?\.\*$/.test(limit)) {
+    const prefix = limit.split('.').slice(0, -1);
+    for (let index = 0; index < prefix.length; index++) {
+      const order = compare(version.core[index], BigInt(prefix[index]));
+      if (order) return order;
+    }
+    return -1;
+  }
+  const boundary = parseSemver(limit);
+  return boundary ? compareSemver(version, boundary) : null;
+}
+
+function evaluateVersionEntry(entry, rawVersion, semver) {
+  const strictLimit = entry.lessThan;
+  const inclusiveLimit = entry.lessThanOrEqual;
+  if (!strictLimit && !inclusiveLimit) {
+    if (!entry.version || /^(all|any|n\/a|unknown|unspecified)$/i.test(entry.version)
+      || entry.version.includes('*') || entry.changes?.length) return 'unknown';
+    if (entry.versionType === 'semver') {
+      const exact = parseSemver(entry.version);
+      if (!exact || !semver) return 'unknown';
+      return compareSemver(semver, exact) === 0 ? entry.status : 'outside';
+    }
+    if (entry.version === rawVersion && /^[vV]?\d[0-9A-Za-z.+:_-]*$/.test(rawVersion)) return entry.status;
+    return semver && parseSemver(entry.version) && !entry.versionType ? 'outside' : 'unsupported';
+  }
+  if ((strictLimit && inclusiveLimit) || entry.versionType !== 'semver' || !semver) {
+    return 'unsupported';
+  }
+
+  const lower = entry.version === '0' ? null : parseSemver(entry.version);
+  const upperOrder = compareSemverLimit(semver, strictLimit || inclusiveLimit);
+  if ((!lower && entry.version !== '0') || upperOrder === null) return 'unsupported';
+  if ((lower && compareSemver(semver, lower) < 0) || upperOrder > 0
+    || (strictLimit && upperOrder === 0)) return 'outside';
+
+  const changes = (entry.changes || []).map((change) => ({...change, parsed:parseSemver(change.at)}));
+  if (changes.some((change) => !change.parsed)) return 'unsupported';
+  changes.sort((a, b) => compareSemver(a.parsed, b.parsed));
+  let lastChange;
+  for (const change of changes) {
+    if (compareSemver(semver, change.parsed) < 0) break;
+    if (lastChange && compareSemver(lastChange.parsed, change.parsed) === 0
+      && lastChange.status !== change.status) return 'unknown';
+    lastChange = change;
+  }
+  return lastChange?.status || entry.status;
+}
+
+function evaluateInstalledVersion(product, version) {
+  const semver = parseSemver(version);
+  const applicable = (product.versions || [])
+    .map((entry) => ({entry, status:evaluateVersionEntry(entry, version, semver)}))
+    .filter(({status}) => status !== 'outside');
+  if (applicable.some(({status}) => status === 'unsupported')) {
+    return {status:'unknown', reason:'CNA 범위에 자동 비교를 지원하지 않는 버전 형식이 있습니다.'};
+  }
+  if (applicable.some(({status}) => !['affected', 'unaffected'].includes(status))
+    || new Set(applicable.map(({status}) => status)).size > 1) {
+    return {status:'unknown', reason:'입력 버전에 해당하는 공지의 상태가 미확인이거나 서로 다릅니다.'};
+  }
+  if (applicable.length) return {status:applicable[0].status, reason:versionLabel(applicable[0].entry)};
+  if (semver && product.versions?.length && ['affected', 'unaffected'].includes(product.defaultStatus)) {
+    return {status:product.defaultStatus, reason:'CNA 레코드의 목록 외 버전 기본 상태를 적용했습니다.'};
+  }
+  return {status:'unknown', reason:'입력 버전의 상태를 구조화된 공지에서 확인할 수 없습니다.'};
+}
+
+function compareProductLabel(product, fallback) {
+  const name = [product.vendor, product.product].filter(Boolean).join(' ') || fallback || '제품명 미확인';
+  return [name, ...(product.platforms || []), ...(product.modules || [])].join(' · ');
+}
+
+function installedVersionCheck(item) {
+  const products = item.cna?.affected || [];
+  const cnaLink = link(`https://www.cve.org/CVERecord?id=${encodeURIComponent(item.id)}`, 'CNA 원문');
+  const vendorLinks = (item.cna?.references || []).map((url) => link(url, '벤더 공지')).filter(Boolean);
+  return `
+    <details class="version-check">
+      <summary>설치 버전·영향 조건 대조</summary>
+      ${products.length ? `
+      <form data-version-check>
+        <p class="version-hint">입력값은 이 화면에서만 사용합니다. 제품과 설치 버전은 공지에 쓰인 형식으로 입력하세요.</p>
+        <div class="version-fields">
+          <label>공지 제품<select name="product" required>
+            ${products.length > 1 ? '<option value="">제품·플랫폼 선택</option>' : ''}
+            ${products.map((product, index) => `<option value="${index}">${escape(compareProductLabel(product, item.product))}</option>`).join('')}
+          </select></label>
+          <label>설치 버전<input name="version" required maxlength="100" placeholder="예: 3.4.1" spellcheck="false" autocomplete="off"></label>
+          <label>설치 유형<select name="build">
+            <option value="">선택해 주세요</option>
+            <option value="upstream">공지 대상 제품의 릴리스</option>
+            <option value="downstream">배포판 패키지·백포트·자체 빌드</option>
+          </select></label>
+          <label>벤더 공지의 영향 조건<select name="conditions">
+            <option value="">확인 전</option>
+            <option value="met">공지의 영향 조건에 해당</option>
+            <option value="not-met">공지에 명시된 필수 조건에 해당하지 않음</option>
+          </select></label>
+        </div>
+        <button type="submit" class="outline">대조 결과 보기</button>
+        <div role="status" class="version-result" hidden></div>
+      </form>` : '<p>구조화된 제품·버전 정보가 없어 자동 대조할 수 없습니다. 원문에서 영향 범위와 패치 버전을 확인하세요.</p>'}
+      <div class="version-sources">${cnaLink} ${vendorLinks.join(' ')}</div>
+    </details>`;
+}
+
+function showInstalledVersionResult(event, item) {
+  const form = event.target.closest('[data-version-check]');
+  if (!form) return;
+  event.preventDefault();
+  const fields = form.elements;
+  const product = item?.cna?.affected?.[Number(fields.product.value)];
+  const version = fields.version.value.trim();
+  if (!product || fields.product.value === '' || !version) return;
+  const upstream = fields.build.value === 'upstream';
+  const result = upstream ? evaluateInstalledVersion(product, version) : null;
+  const conditionNotes = [
+    product.platforms?.length ? `플랫폼 · ${product.platforms.join(', ')}` : '',
+    product.modules?.length ? `구성요소 · ${product.modules.join(', ')}` : '',
+    ...attackConditions(item),
+  ].filter(Boolean);
+  const fixes = [...new Set([...(item.fixes || []), ...(item.describedFixes || [])])];
+  let headline = '추가 확인 필요';
+  let explanation = '벤더 공지에서 제품 에디션·기능 설정과 영향 조건을 확인하세요.';
+  if (!upstream) {
+    explanation = '배포판·백포트·자체 빌드는 설치 패키지 릴리스와 해당 공급사의 보안 공지로 확인하세요.';
+    if (!fields.build.value) explanation = '설치 유형을 선택하면 공지 범위와 대조할 수 있습니다.';
+  } else if (result.status === 'unaffected') {
+    headline = '공지상 해당 버전은 영향 없음';
+    explanation = '선택한 제품·플랫폼의 공지 범위를 기준으로 확인했습니다.';
+  } else if (result.status === 'affected' && fields.conditions.value === 'met') {
+    headline = '공지상 영향 조건에 해당';
+    explanation = '확인한 조건과 설치 버전을 기준으로 패치 또는 완화조치를 검토하세요.';
+  } else if (result.status === 'affected' && fields.conditions.value === 'not-met') {
+    explanation = '버전은 영향 범위에 해당합니다. 확인한 필수 조건과 다른 악용 경로가 있는지 공지에서 다시 대조하세요.';
+  }
+  const output = form.querySelector('.version-result');
+  output.innerHTML = `
+    <strong>${headline}</strong><p>${explanation}</p>
+    ${result ? `<p>버전 근거 · ${escape(result.reason)}</p>` : ''}
+    ${result?.status === 'unknown' && product.versions?.length ? `<details>
+      <summary>CNA 버전 범위 직접 대조</summary>
+      <ul class="detail-list">${product.versions.map((entry) => `<li>${escape(versionLabel(entry))}</li>`).join('')}</ul>
+    </details>` : ''}
+    ${conditionNotes.length ? `<p>제품·CVSS 참고 조건 · ${escape(conditionNotes.join(' / '))}</p>` : ''}
+    <p>수정 정보 · ${escape(fixes.join(', ') || item.cna?.solutions?.[0] || '확인된 수정 버전 없음 · 원문 공지 참조')}</p>`;
+  output.hidden = false;
+}
+
 function bilingual(item) {
   const english = item.descriptionEn || item.description;
   const korean = item.descriptionKo;
@@ -410,6 +595,7 @@ function renderInspector(panel = $('#inspector'), item = selected) {
       <div>EPSS<strong>${epss(item)}</strong></div><div>KEV<strong>${kev(item)}</strong></div>
     </div>
     ${actionSummary(item)}
+    ${installedVersionCheck(item)}
     <div class="review-control">
       <label>내 점검 상태 <select data-review-state aria-label="내 점검 상태">
         ${reviewState(item) === 'recheck' ? '<option value="recheck" selected disabled>재검토 필요</option>' : ''}
@@ -687,6 +873,15 @@ async function copyCveLink(button, item) {
     input.select();
   }
 }
+for (const panel of [$('#inspector'), $('#priority-inspector')]) {
+  panel.addEventListener('submit', (event) => showInstalledVersionResult(event,
+    panel.id === 'inspector' ? selected : priorities.find((item) => item.id === prioritySelection)));
+  panel.addEventListener('input', (event) => {
+    const form = event.target.closest('[data-version-check]');
+    if (form) form.querySelector('.version-result').hidden = true;
+  });
+}
+
 let guideItem;
 $('#inspector').addEventListener('click', (event) => detailsAction(event, selected));
 $('#guide').addEventListener('click', (event) => {

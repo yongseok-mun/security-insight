@@ -290,9 +290,13 @@ function versionLabel(entry) {
   return [`${versionStates[entry.status] || '미확인'}: ${range}`, ...transitions].join(' · ');
 }
 
+function cvssMetrics(item) {
+  if (!/^CVSS:(3\.[01]|4\.0)\//.test(item.vector || '')) return {};
+  return Object.fromEntries(item.vector.split('/').slice(1).map((part) => part.split(':')));
+}
+
 function attackConditions(item) {
-  if (!/^CVSS:(3\.[01]|4\.0)\//.test(item.vector || '')) return [];
-  const values = Object.fromEntries(item.vector.split('/').slice(1).map((part) => part.split(':')));
+  const values = cvssMetrics(item);
   const mapping = [
     ['AV', '접근 경로', {N:'네트워크', A:'인접 네트워크', L:'로컬', P:'물리 접근'}],
     ['PR', '필요 권한', {N:'없음', L:'낮은 권한', H:'높은 권한'}],
@@ -693,7 +697,7 @@ function renderInspector(panel = $('#inspector'), item = selected) {
     ${metricFreshness(item)}
     <div class="actions triage-actions">
       <button class="outline" data-guide="check">${icon('shield')}안전한 점검</button>
-      <button class="outline" type="button" data-check-request>${icon('doc')}점검 요청 복사</button>
+      <button class="outline" type="button" data-generate-advisory>${icon('doc')}보안공지문 생성</button>
       <button class="outline" type="button" data-copy-cve>${icon('link')}이 CVE 링크 복사</button>
       <span class="copy-status" role="status"></span>
     </div>
@@ -941,24 +945,28 @@ function detailsAction(event, item) {
   if (translate) translateDescription(translate, item);
   const copy = event.target.closest('[data-copy-cve]');
   if (copy) copyCveLink(copy, item);
-  const request = event.target.closest('[data-check-request]');
-  if (request) openCheckRequest(request, item);
+  const advisory = event.target.closest('[data-generate-advisory]');
+  if (advisory) openAdvisory(advisory, item);
 }
 
-function checkRequestText(item, {comparison, version} = {}) {
+function advisoryText(item, {comparison, version} = {}) {
   const affected = item.cna?.affected || [];
-  const ranges = [
-    ...affectedRanges(item),
-    ...affected.filter((product) => product.defaultStatus === 'affected').map((product) =>
-      `${product.product || item.product || '제품 미확인'} · 목록 외 버전도 영향 범위에 포함. CNA 원문의 예외 버전 확인`),
-  ];
-  const conditions = [
-    ...new Set(affected.flatMap((product) => [
-      ...(product.platforms?.length ? [`플랫폼 · ${product.platforms.join(', ')}`] : []),
-      ...(product.modules?.length ? [`구성요소 · ${product.modules.join(', ')}`] : []),
-    ])),
-    ...attackConditions(item).map((condition) => `${condition} (CVSS 기준)`),
-  ];
+  const scope = affected.flatMap((product) => [
+    `- 제품: ${[product.vendor, product.product].filter(Boolean).join(' / ') || item.product || 'CNA 원문 참조'}`,
+    ...(product.platforms?.length ? [`  플랫폼: ${product.platforms.join(', ')}`] : []),
+    ...(product.modules?.length ? [`  구성요소: ${product.modules.join(', ')}`] : []),
+    ...(product.versions?.length ? product.versions.map((entry) => `  ${versionLabel(entry)}`) : ['  버전 범위 미기재']),
+    `  목록 외 버전: ${versionStates[product.defaultStatus] || '영향 여부 미확인'}`,
+  ]);
+  const conditions = attackConditions(item);
+  const metrics = cvssMetrics(item);
+  const impacts = (prefix) => [['C', '기밀성'], ['I', '무결성'], ['A', '가용성']].flatMap(([key, label]) => {
+    const level = metrics[prefix + key];
+    return level === 'H' || level === 'L' ? [`${label} ${level === 'H' ? '높음' : '낮음'}`] : [];
+  }).join(' / ');
+  const vulnerableImpacts = impacts(item.vector?.startsWith('CVSS:4.0/') ? 'V' : '');
+  const subsequentImpacts = impacts('S');
+  const networkPath = metrics.AV === 'N' || metrics.AV === 'A';
   const [fixes, solutions, workarounds, requiredAction] = remediationValues(item);
   const cna = `https://www.cve.org/CVERecord?id=${encodeURIComponent(item.id)}`;
   const nvd = `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(item.id)}`;
@@ -977,30 +985,46 @@ function checkRequestText(item, {comparison, version} = {}) {
         `  이후: ${after.join(' / ') || '기록된 정보 없음'}`);
     }
   }
+  const description = item.descriptionKo || item.descriptionEn || item.description;
   return [
-    `[취약점 점검 요청] ${item.id} · ${item.title}`,
+    `[보안공지] ${item.id} · ${item.title}`,
     '',
-    '담당 제품의 영향 여부를 확인하고 아래 양식으로 회신 부탁드립니다.',
+    '1. 취약점 개요',
+    ...(item.published ? [`- 공개 시각: ${date(item.published)}`] : []),
+    description ? `- ${description}${item.descriptionKo && item.translationSource ? ` (${item.translationSource})` : ''}`
+      : '- 수집된 상세 설명이 없습니다. 아래 원문을 확인해 주세요.',
     '',
-    '[영향 범위 및 조건]',
-    `- 제품: ${item.product || [...new Set(affected.map((entry) => entry.product).filter(Boolean))].join(', ') || 'CNA 원문 참조'}`,
-    ...[...new Set(ranges)].map((range) => `- ${range}`),
-    ...(!ranges.length ? ['- 구조화된 영향 버전 미확인 · 원문 공지 참조'] : []),
-    ...conditions.map((condition) => `- ${condition}`),
-    '- 설치 버전과 빌드, 기능 활성화 여부, 외부 접근 가능 여부를 벤더 공지의 조건과 대조해 주세요.',
+    '2. 주요 위험성',
+    `- 심각도: ${Number.isFinite(item.cvss) ? `CVSS ${item.cvssVersion ? `v${item.cvssVersion} ` : ''}${cvss(item)}` : 'CVSS 점수 미확인'}`,
+    ...(vulnerableImpacts ? [`- 악용 성공 시 영향(CVSS): ${vulnerableImpacts}`] : []),
+    ...(subsequentImpacts ? [`- 후속 시스템 영향(CVSS): ${subsequentImpacts}`] : []),
+    `- 실제 악용 근거: ${item.kev === true ? 'CISA KEV 등재' : '이 공지에서 확인된 KEV 등재 근거 없음'}`,
+    ...(item.epss && item.epssStatus !== 'stale' ? [`- EPSS: ${epss(item)}${item.epss.date ? ` (${item.epss.date} 기준)` : ''} · 30일 내 악용 확률 추정치`] : []),
     '',
-    '[패치 및 완화]',
-    `- 수정 버전: ${fixes.join(', ') || '수정 버전 미확인 · 원문 공지 참조'}`,
-    ...solutions.map((solution) => `- CNA 해결책: ${solution}`),
-    ...workarounds.map((workaround) => `- CNA 완화책: ${workaround}`),
-    ...(requiredAction ? [`- CISA KEV 조치 권고: ${requiredAction}`] : []),
-    ...changes,
+    '3. 영향 범위(버전 및 전제조건)',
+    ...(scope.length ? scope : [`- 제품: ${item.product || '미확인'} · 구조화된 영향 버전 미확인`]),
+    ...(conditions.length ? [`- 악용 조건(CVSS): ${conditions.join(' / ')}`] : []),
+    '- 제품별 기능 활성화·배포 형태 등 세부 전제조건은 벤더 공지에서 확인해 주세요.',
+    '',
+    '4. 영향범위 확인 방법',
+    '- 자산 목록이나 관리 콘솔에서 제품·에디션, 설치 버전·빌드, 배포판 패키지 릴리스를 조회합니다.',
+    '- 벤더 공지에 명시된 기능·모듈·설정의 적용 여부와 대상 경로에 대한 접근 권한을 읽기 전용으로 확인합니다.',
+    ...(networkPath ? ['- 방화벽·로드밸런서 정책과 자산 정보를 대조해 영향 인터페이스의 외부 또는 인접망 접근 여부를 확인합니다.'] : []),
+    '- 버전·설정 모두를 벤더 영향 범위와 비교합니다. 백포트·자체 빌드는 공급사 공지와 패키지 변경 이력을 확인합니다.',
     ...(version ? ['', '[설치 버전 대조 참고]', version] : []),
     '',
-    '[회신 양식]',
-    '- 제품 / 설치 버전·빌드:',
-    '- 영향 여부 (해당 / 미해당 / 추가 확인 필요) 및 판단 근거:',
-    '- 조치 계획 또는 미조치 사유 / 조치 예정일:',
+    '5. 조치 방법(패치·완화·보안장비·접근제어)',
+    `- 패치: ${fixes.length ? `수집된 수정 버전 ${fixes.join(', ')}. 대상 릴리스의 수정 버전을 벤더 공지에서 확인 후 적용합니다.`
+      : '대상 릴리스의 수정 버전과 적용 절차를 벤더 공지에서 확인합니다.'}`,
+    ...solutions.map((solution) => `  CNA 해결책: ${solution}`),
+    ...(workarounds.length ? workarounds.map((workaround) => `- 임시 완화(CNA): ${workaround}`)
+      : ['- 임시 완화: 수집된 CNA 권고가 없습니다. 즉시 패치가 어려우면 벤더가 안내한 우회책의 적용 가능 여부를 확인합니다.']),
+    ...(requiredAction ? [`- CISA KEV 조치 권고: ${requiredAction}`] : []),
+    '- 보안장비 정책(보완 통제): 영향 트래픽이 장비를 통과하고 해당 CVE의 벤더 검증 규칙이 있는 경우, 정상 업무 트래픽의 오탐을 확인한 뒤 WAF·IPS 정책 적용을 검토합니다.',
+    networkPath ? '- 접근제어: 영향 인터페이스에 불필요한 접근을 차단하고 필요한 출발지·네트워크만 허용합니다.'
+      : '- 접근제어: 영향 기능을 이용할 수 있는 계정·서비스 권한을 확인하고 불필요한 권한을 줄입니다.',
+    '- 조치 후 설치 버전·설정과 정상 서비스 동작을 재확인합니다. 보안장비 정책을 적용했다면 로그에서 탐지·차단과 오탐 여부를 확인합니다.',
+    ...changes,
     '',
     '[근거 링크]',
     ...vendors.map((url) => `- 벤더 공지: ${url}`),
@@ -1011,14 +1035,14 @@ function checkRequestText(item, {comparison, version} = {}) {
   ].join('\n');
 }
 
-const requestDialog = $('#check-request-dialog');
-let requestDraft;
+const advisoryDialog = $('#advisory-dialog');
+let advisoryDraft;
 
-function openCheckRequest(button, item) {
+function openAdvisory(button, item) {
   const panel = button.closest('.inspector');
   const result = panel.querySelector('.version-result');
   const fields = result?.closest('form').elements;
-  requestDraft = {
+  advisoryDraft = {
     item,
     comparison:reviewState(item) === 'recheck' ? remediationComparison(item, preferences.reviews[item.id]) : null,
     version:result && !result.hidden ? [
@@ -1029,32 +1053,32 @@ function openCheckRequest(button, item) {
     ].join('\n') : '',
   };
   for (const key of ['comparison', 'version']) {
-    const option = requestDialog.querySelector(`[name="${key}"]`);
+    const option = advisoryDialog.querySelector(`[name="${key}"]`);
     option.checked = false;
-    option.closest('label').hidden = !requestDraft[key];
+    option.closest('label').hidden = !advisoryDraft[key];
   }
-  updateCheckRequest();
-  requestDialog.showModal();
+  updateAdvisory();
+  advisoryDialog.showModal();
 }
 
-function updateCheckRequest() {
-  if (!requestDraft) return;
-  const {item, comparison, version} = requestDraft;
-  requestDialog.querySelector('textarea').value = checkRequestText(item, {
-    comparison:requestDialog.querySelector('[name="comparison"]').checked ? comparison : null,
-    version:requestDialog.querySelector('[name="version"]').checked ? version : '',
+function updateAdvisory() {
+  if (!advisoryDraft) return;
+  const {item, comparison, version} = advisoryDraft;
+  advisoryDialog.querySelector('textarea').value = advisoryText(item, {
+    comparison:advisoryDialog.querySelector('[name="comparison"]').checked ? comparison : null,
+    version:advisoryDialog.querySelector('[name="version"]').checked ? version : '',
   });
-  requestDialog.querySelector('[role="status"]').textContent = '';
+  advisoryDialog.querySelector('[role="status"]').textContent = '';
 }
 
-requestDialog.addEventListener('change', updateCheckRequest);
-requestDialog.addEventListener('close', () => { requestDraft = null; });
-requestDialog.querySelector('[data-copy-request]').addEventListener('click', async () => {
-  const preview = requestDialog.querySelector('textarea');
-  const status = requestDialog.querySelector('[role="status"]');
+advisoryDialog.addEventListener('change', updateAdvisory);
+advisoryDialog.addEventListener('close', () => { advisoryDraft = null; });
+advisoryDialog.querySelector('[data-copy-advisory]').addEventListener('click', async () => {
+  const preview = advisoryDialog.querySelector('textarea');
+  const status = advisoryDialog.querySelector('[role="status"]');
   try {
     await navigator.clipboard.writeText(preview.value);
-    status.textContent = '점검 요청 문안을 복사했습니다.';
+    status.textContent = '보안공지문을 복사했습니다.';
   } catch {
     preview.focus();
     preview.select();

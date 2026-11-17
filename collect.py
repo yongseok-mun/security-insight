@@ -314,14 +314,15 @@ def enrich_cves(records, previous, translations):
                 item['title'] = item['cnaTitle']
             english = item.get('descriptionEn') or item.get('cnaEnglish')
             korean = (item.get('descriptionKo') if item.get('translationSource') != '한국어 요약' else None) or item.get('cnaKorean')
+            documented = translations.get(item['id'], {})
+            if english and documented.get('sha256') != hashlib.sha256(english.encode('utf-8')).hexdigest():
+                documented = {}
+            item['titleKo'] = documented.get('title') if english else None
             if korean:
                 item['translationSource'] = '공식 레코드'
-            elif english:
-                documented = translations.get(item['id'], {})
-                digest = hashlib.sha256(english.encode('utf-8')).hexdigest()
-                if documented.get('sha256') == digest:
-                    korean = documented['summary']
-                    item['translationSource'] = '한국어 요약'
+            elif english and documented.get('summary'):
+                korean = documented['summary']
+                item['translationSource'] = '한국어 요약'
             explicit_fixes = re.findall(
                 r'\b(?:fixed|patched|resolved) in version v?([0-9][0-9A-Za-z.+-]*[0-9A-Za-z])\b',
                 english or '', flags=re.IGNORECASE)

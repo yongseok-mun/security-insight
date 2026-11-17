@@ -280,11 +280,14 @@ function evidence(item) {
 
 const versionStates = {affected:'영향받음', unaffected:'영향 없음', unknown:'영향 여부 미확인'};
 
+const versionNames = new Map([['all','모든 버전'], ['any','모든 버전'], ['previous versions','이전 버전'], ['n/a','버전 미기재']]);
+
 function versionLabel(entry) {
-  const lower = entry.version === '0' && (entry.lessThan || entry.lessThanOrEqual)
-    ? '최초 버전부터' : `${entry.version} 이상`;
+  const version = versionNames.get(String(entry.version).toLowerCase()) || entry.version;
+  const lower = version === '0' && (entry.lessThan || entry.lessThanOrEqual)
+    ? '최초 버전부터' : `${version} 이상`;
   const range = entry.lessThan ? `${lower} · ${entry.lessThan} 미만`
-    : entry.lessThanOrEqual ? `${lower} · ${entry.lessThanOrEqual} 이하` : entry.version;
+    : entry.lessThanOrEqual ? `${lower} · ${entry.lessThanOrEqual} 이하` : version;
   const transitions = (entry.changes || []).map((change) =>
     `${change.at}부터 ${versionStates[change.status] || '상태 확인 필요'}`);
   return [`${versionStates[entry.status] || '미확인'}: ${range}`, ...transitions].join(' · ');
@@ -949,7 +952,44 @@ function detailsAction(event, item) {
   if (advisory) openAdvisory(advisory, item);
 }
 
-function advisoryText(item, {comparison, version} = {}) {
+const advisoryTypes = [
+  [/\b(?:server.side request forgery|SSRF)\b/i, '서버 측 요청 위조(SSRF)'],
+  [/\b(?:cross.site scripting|XSS)\b/i, '크로스 사이트 스크립팅(XSS)'],
+  [/\b(?:authentication|auth) bypass\b/i, '인증 우회'],
+  [/\bauthorization bypass\b/i, '권한 검사 우회'],
+  [/\b(?:remote )?code execution\b/i, '코드 실행'],
+  [/\b(?:sensitive )?(?:information|file|data) disclosure\b/i, '정보 노출'],
+  [/\bdenial of service\b/i, '서비스 거부'],
+  [/\bprivilege escalation\b/i, '권한 상승'],
+  [/\b(?:directory|path) traversal\b/i, '경로 탐색'],
+  [/\bSQL injection\b/i, 'SQL 삽입'],
+  [/\bunrestricted file upload\b/i, '파일 업로드 제한 우회'],
+  [/\bopen redirect\b/i, '외부 리다이렉트'],
+];
+
+const containsKorean = (value) => /[가-힣]{2}/.test(value || '');
+const koreanText = (source, translations) => containsKorean(source) ? source : translations.get(source);
+const englishDescription = (item) => item.descriptionEn || item.description;
+
+function advisoryChanges(comparison) {
+  if (!comparison) return [];
+  const {rows, events} = comparison;
+  return rows.length ? rows : events.flatMap((event) => (event.changes || [])
+    .map((change) => ({...change, at:event.at})));
+}
+
+function advisoryTranslationSources(item, comparison) {
+  const [, solutions, workarounds, requiredAction] = remediationValues(item);
+  const changeText = advisoryChanges(comparison).flatMap(({field, before, after}) =>
+    field === remediationFields[0] ? [] : [...before, ...after]);
+  return [...new Set([
+    item.titleKo ? '' : item.title,
+    item.descriptionKo ? '' : englishDescription(item),
+    ...solutions, ...workarounds, requiredAction, ...changeText,
+  ])].filter((text) => text && text !== item.id && !containsKorean(text));
+}
+
+function advisoryText(item, {comparison, version, translations = new Map()} = {}) {
   const affected = item.cna?.affected || [];
   const scope = affected.flatMap((product) => [
     `- 제품: ${[product.vendor, product.product].filter(Boolean).join(' / ') || item.product || 'CNA 원문 참조'}`,
@@ -977,22 +1017,31 @@ function advisoryText(item, {comparison, version} = {}) {
     changes.push('', '[조치 완료 이후 변경]');
     if (!completed) changes.push('완료 당시 비교 정보를 확인할 수 없습니다.');
     if (!rows.length && events.length) changes.push('수집된 변경 이력 기준입니다.');
-    const entries = rows.length ? rows : events.flatMap((event) => (event.changes || [])
-      .map((change) => ({...change, at:event.at})));
-    for (const {field, before, after, at} of entries) {
+    for (const {field, before, after, at} of advisoryChanges(comparison)) {
+      const value = (entries) => entries.map((entry) => field === remediationFields[0] ? entry
+        : koreanText(entry, translations) || '원문 공지에서 확인').join(' / ') || '기록된 정보 없음';
       changes.push(`- ${field} · 변경 감지 ${at ? date(at) : '시각 미확인'}`,
-        `  이전: ${before.join(' / ') || '기록된 정보 없음'}`,
-        `  이후: ${after.join(' / ') || '기록된 정보 없음'}`);
+        `  이전: ${value(before)}`,
+        `  이후: ${value(after)}`);
     }
   }
-  const description = item.descriptionKo || item.descriptionEn || item.description;
+  const product = [...new Set(affected.map((entry) => entry.product).filter(Boolean))].join(', ') || item.product;
+  const types = advisoryTypes.filter(([pattern]) => pattern.test(item.title)).map(([, label]) => label);
+  const type = types.length ? types.join('·') + ' 취약점' : '보안 취약점';
+  const title = item.titleKo || koreanText(item.title, translations) || [product, type].filter(Boolean).join(' ');
+  const original = englishDescription(item);
+  const description = item.descriptionKo || koreanText(original, translations);
+  const descriptionSource = item.descriptionKo ? item.translationSource : translations.has(original) ? '브라우저 기계 번역' : '';
+  const structuredOverview = product && types.length ? `${product}의 ${type}에 대한 공개 공지입니다.`
+    : product ? `${product}에 영향을 주는 보안 취약점이 공개됐습니다.` : '공개된 보안 취약점입니다.';
+  const localizedAction = (text) => koreanText(text, translations) || '수집한 원문 공지에서 세부 지침을 확인해 주세요.';
   return [
-    `[보안공지] ${item.id} · ${item.title}`,
+    `[보안공지] ${item.id} · ${title}`,
     '',
     '1. 취약점 개요',
     ...(item.published ? [`- 공개 시각: ${date(item.published)}`] : []),
-    description ? `- ${description}${item.descriptionKo && item.translationSource ? ` (${item.translationSource})` : ''}`
-      : '- 수집된 상세 설명이 없습니다. 아래 원문을 확인해 주세요.',
+    description ? `- ${description}${descriptionSource ? ` (${descriptionSource})` : ''}`
+      : `- ${structuredOverview} 상세 공격 원리와 영향은 연결된 원문 공지에서 확인해 주세요.`,
     '',
     '2. 주요 위험성',
     `- 심각도: ${Number.isFinite(item.cvss) ? `CVSS ${item.cvssVersion ? `v${item.cvssVersion} ` : ''}${cvss(item)}` : 'CVSS 점수 미확인'}`,
@@ -1016,10 +1065,10 @@ function advisoryText(item, {comparison, version} = {}) {
     '5. 조치 방법(패치·완화·보안장비·접근제어)',
     `- 패치: ${fixes.length ? `수집된 수정 버전 ${fixes.join(', ')}. 대상 릴리스의 수정 버전을 벤더 공지에서 확인 후 적용합니다.`
       : '대상 릴리스의 수정 버전과 적용 절차를 벤더 공지에서 확인합니다.'}`,
-    ...solutions.map((solution) => `  CNA 해결책: ${solution}`),
-    ...(workarounds.length ? workarounds.map((workaround) => `- 임시 완화(CNA): ${workaround}`)
+    ...[...new Set(solutions.map(localizedAction))].map((solution) => `  CNA 해결책: ${solution}`),
+    ...(workarounds.length ? [...new Set(workarounds.map(localizedAction))].map((workaround) => `- 임시 완화(CNA): ${workaround}`)
       : ['- 임시 완화: 수집된 CNA 권고가 없습니다. 즉시 패치가 어려우면 벤더가 안내한 우회책의 적용 가능 여부를 확인합니다.']),
-    ...(requiredAction ? [`- CISA KEV 조치 권고: ${requiredAction}`] : []),
+    ...(requiredAction ? [`- CISA KEV 조치 권고: ${localizedAction(requiredAction)}`] : []),
     '- 보안장비 정책(보완 통제): 영향 트래픽이 장비를 통과하고 해당 CVE의 벤더 검증 규칙이 있는 경우, 정상 업무 트래픽의 오탐을 확인한 뒤 WAF·IPS 정책 적용을 검토합니다.',
     networkPath ? '- 접근제어: 영향 인터페이스에 불필요한 접근을 차단하고 필요한 출발지·네트워크만 허용합니다.'
       : '- 접근제어: 영향 기능을 이용할 수 있는 계정·서비스 권한을 확인하고 불필요한 권한을 줄입니다.',
@@ -1042,14 +1091,18 @@ function openAdvisory(button, item) {
   const panel = button.closest('.inspector');
   const result = panel.querySelector('.version-result');
   const fields = result?.closest('form').elements;
+  const reportedSolution = item.cna?.solutions?.[0];
+  const untranslatedSolution = containsKorean(reportedSolution) ? '' : reportedSolution;
   advisoryDraft = {
     item,
     comparison:reviewState(item) === 'recheck' ? remediationComparison(item, preferences.reviews[item.id]) : null,
+    translations:new Map(),
     version:result && !result.hidden ? [
       `대조 제품: ${fields.product.selectedOptions[0].textContent.trim()}`,
       `입력 버전: ${fields.version.value.trim()}`,
       `설치 유형: ${fields.build.selectedOptions[0].textContent.trim()}`,
-      result.innerText.trim(),
+      untranslatedSolution ? result.innerText.trim().replace(untranslatedSolution, '원문 공지의 해결책 확인')
+        : result.innerText.trim(),
     ].join('\n') : '',
   };
   for (const key of ['comparison', 'version']) {
@@ -1057,25 +1110,61 @@ function openAdvisory(button, item) {
     option.checked = false;
     option.closest('label').hidden = !advisoryDraft[key];
   }
+  const translate = advisoryDialog.querySelector('[data-translate-advisory]');
+  translate.hidden = !('Translator' in globalThis) || !advisoryTranslationSources(item, advisoryDraft.comparison).length;
+  translate.disabled = false;
+  advisoryDialog.querySelector('[data-translation-status]').textContent = '';
   updateAdvisory();
   advisoryDialog.showModal();
 }
 
 function updateAdvisory() {
   if (!advisoryDraft) return;
-  const {item, comparison, version} = advisoryDraft;
+  const {item, comparison, version, translations} = advisoryDraft;
   advisoryDialog.querySelector('textarea').value = advisoryText(item, {
     comparison:advisoryDialog.querySelector('[name="comparison"]').checked ? comparison : null,
     version:advisoryDialog.querySelector('[name="version"]').checked ? version : '',
+    translations,
   });
-  advisoryDialog.querySelector('[role="status"]').textContent = '';
+  advisoryDialog.querySelector('[data-copy-status]').textContent = '';
 }
 
 advisoryDialog.addEventListener('change', updateAdvisory);
 advisoryDialog.addEventListener('close', () => { advisoryDraft = null; });
+advisoryDialog.querySelector('[data-translate-advisory]').addEventListener('click', async (event) => {
+  const draft = advisoryDraft;
+  if (!draft) return;
+  const button = event.currentTarget;
+  const status = advisoryDialog.querySelector('[data-translation-status]');
+  button.disabled = true;
+  status.textContent = '브라우저에서 원문을 번역하고 있습니다.';
+  let translator;
+  try {
+    translator = await Translator.create({sourceLanguage:'en', targetLanguage:'ko'});
+    const sources = advisoryTranslationSources(draft.item, draft.comparison);
+    for (const source of sources) {
+      if (advisoryDraft !== draft) return;
+      if (draft.translations.has(source)) continue;
+      const translated = (await translator.translate(source)).trim();
+      if (containsKorean(translated)) draft.translations.set(source, translated);
+    }
+    if (advisoryDraft !== draft) return;
+    updateAdvisory();
+    status.textContent = draft.translations.size === sources.length
+      ? '원문을 기계 번역했습니다. 버전과 조치 내용은 원문과 대조해 주세요.'
+      : '일부 원문을 번역했습니다. 남은 지침은 원문에서 확인해 주세요.';
+  } catch {
+    if (advisoryDraft !== draft) return;
+    updateAdvisory();
+    status.textContent = '브라우저 번역을 완료하지 못했습니다. 현재 한국어 초안을 사용할 수 있습니다.';
+  } finally {
+    translator?.destroy();
+    if (advisoryDraft === draft) button.disabled = false;
+  }
+});
 advisoryDialog.querySelector('[data-copy-advisory]').addEventListener('click', async () => {
   const preview = advisoryDialog.querySelector('textarea');
-  const status = advisoryDialog.querySelector('[role="status"]');
+  const status = advisoryDialog.querySelector('[data-copy-status]');
   try {
     await navigator.clipboard.writeText(preview.value);
     status.textContent = '보안공지문을 복사했습니다.';

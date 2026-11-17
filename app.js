@@ -35,14 +35,18 @@ const labels = {home:'보안 브리핑', news:'보안 뉴스', issues:'핵심 �
 const comparePriority = (a, b) => Number(b.kev === true) - Number(a.kev === true)
   || (b.cvss ?? -1) - (a.cvss ?? -1) || (b.epss?.score ?? -1) - (a.epss?.score ?? -1)
   || (b.published || '').localeCompare(a.published || '');
-const link = (address, label) => {
+const publicUrl = (address) => {
   try {
     const parsed = new URL(address);
     if (['https:', 'http:'].includes(parsed.protocol) && !parsed.username && !parsed.password) {
-      return `<a href="${escape(parsed.href)}" target="_blank" rel="noopener noreferrer">${escape(label)} ↗</a>`;
+      return parsed.href;
     }
   } catch { /* The upstream record may have no URL. */ }
   return '';
+};
+const link = (address, label) => {
+  const url = publicUrl(address);
+  return url ? `<a href="${escape(url)}" target="_blank" rel="noopener noreferrer">${escape(label)} ↗</a>` : '';
 };
 
 const requestedCve = new URL(location.href).searchParams.get('cve')?.trim().toUpperCase();
@@ -544,11 +548,15 @@ async function translateDescription(button, item) {
   }
 }
 
-function actionSummary(item) {
-  const affected = item.cna?.affected || [];
-  const ranges = affected.flatMap((product) => product.versions
+function affectedRanges(item) {
+  return (item.cna?.affected || []).flatMap((product) => (product.versions || [])
     .filter((entry) => entry.status === 'affected' || (entry.changes || []).some((change) => change.status === 'affected'))
     .map((entry) => `${product.product || item.product || '제품 미확인'} · ${versionLabel(entry)}`));
+}
+
+function actionSummary(item) {
+  const affected = item.cna?.affected || [];
+  const ranges = affectedRanges(item);
   const conditions = attackConditions(item);
   const fixes = [...new Set([...item.fixes, ...(item.describedFixes || [])])];
   const platforms = [...new Set(affected.flatMap((product) => product.platforms || []))];
@@ -582,19 +590,8 @@ function changeDetails(event) {
     <dd><strong>현재</strong> ${escape(change.after.join(' / ') || '수집 정보 없음')}</dd></div>`).join('')}</dl>`;
 }
 
-function reviewComparison(item, state) {
-  if (state !== 'done' && state !== 'recheck') return '';
-  const review = preferences.reviews[item.id];
+function remediationComparison(item, review) {
   const completed = completedRemediation(review);
-  const savedAt = Date.parse(review.completedAt);
-  const baselineAt = Date.parse(review.reviewedThrough);
-  const times = [
-    Number.isFinite(savedAt) ? `완료 기록 ${date(savedAt)}` : '',
-    Number.isFinite(baselineAt) ? `당시 데이터 ${date(baselineAt)}` : '',
-  ].filter(Boolean);
-  if (state === 'done') {
-    return times.length ? `<p class="review-baseline" data-review-comparison>${escape(times.join(' · '))}</p>` : '';
-  }
   const current = remediationValues(item);
   const events = remediationSinceReview(item, review)
     .sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
@@ -604,6 +601,22 @@ function reviewComparison(item, state) {
     const values = (value) => (Array.isArray(value) ? value : [value]).filter(Boolean);
     return [{field, before:values(completed[index]), after:values(current[index]), at:latest?.at}];
   }) : [];
+  return {completed, events, rows};
+}
+
+function reviewComparison(item, state) {
+  if (state !== 'done' && state !== 'recheck') return '';
+  const review = preferences.reviews[item.id];
+  const savedAt = Date.parse(review.completedAt);
+  const baselineAt = Date.parse(review.reviewedThrough);
+  const times = [
+    Number.isFinite(savedAt) ? `완료 기록 ${date(savedAt)}` : '',
+    Number.isFinite(baselineAt) ? `당시 데이터 ${date(baselineAt)}` : '',
+  ].filter(Boolean);
+  if (state === 'done') {
+    return times.length ? `<p class="review-baseline" data-review-comparison>${escape(times.join(' · '))}</p>` : '';
+  }
+  const {completed, events, rows} = remediationComparison(item, review);
   const renderedValues = (values) => values.length ? values.map(escape).join('<br>') : '기록된 정보 없음';
   const sources = [
     link(`https://www.cve.org/CVERecord?id=${encodeURIComponent(item.id)}`, 'CNA 원문'),
@@ -680,6 +693,7 @@ function renderInspector(panel = $('#inspector'), item = selected) {
     ${metricFreshness(item)}
     <div class="actions triage-actions">
       <button class="outline" data-guide="check">${icon('shield')}안전한 점검</button>
+      <button class="outline" type="button" data-check-request>${icon('doc')}점검 요청 복사</button>
       <button class="outline" type="button" data-copy-cve>${icon('link')}이 CVE 링크 복사</button>
       <span class="copy-status" role="status"></span>
     </div>
@@ -927,7 +941,126 @@ function detailsAction(event, item) {
   if (translate) translateDescription(translate, item);
   const copy = event.target.closest('[data-copy-cve]');
   if (copy) copyCveLink(copy, item);
+  const request = event.target.closest('[data-check-request]');
+  if (request) openCheckRequest(request, item);
 }
+
+function checkRequestText(item, {comparison, version} = {}) {
+  const affected = item.cna?.affected || [];
+  const ranges = [
+    ...affectedRanges(item),
+    ...affected.filter((product) => product.defaultStatus === 'affected').map((product) =>
+      `${product.product || item.product || '제품 미확인'} · 목록 외 버전도 영향 범위에 포함. CNA 원문의 예외 버전 확인`),
+  ];
+  const conditions = [
+    ...new Set(affected.flatMap((product) => [
+      ...(product.platforms?.length ? [`플랫폼 · ${product.platforms.join(', ')}`] : []),
+      ...(product.modules?.length ? [`구성요소 · ${product.modules.join(', ')}`] : []),
+    ])),
+    ...attackConditions(item).map((condition) => `${condition} (CVSS 기준)`),
+  ];
+  const [fixes, solutions, workarounds, requiredAction] = remediationValues(item);
+  const cna = `https://www.cve.org/CVERecord?id=${encodeURIComponent(item.id)}`;
+  const nvd = `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(item.id)}`;
+  const vendors = [...new Set((item.cna?.references || []).map(publicUrl).filter(Boolean))];
+  const changes = [];
+  if (comparison) {
+    const {completed, events, rows} = comparison;
+    changes.push('', '[조치 완료 이후 변경]');
+    if (!completed) changes.push('완료 당시 비교 정보를 확인할 수 없습니다.');
+    if (!rows.length && events.length) changes.push('수집된 변경 이력 기준입니다.');
+    const entries = rows.length ? rows : events.flatMap((event) => (event.changes || [])
+      .map((change) => ({...change, at:event.at})));
+    for (const {field, before, after, at} of entries) {
+      changes.push(`- ${field} · 변경 감지 ${at ? date(at) : '시각 미확인'}`,
+        `  이전: ${before.join(' / ') || '기록된 정보 없음'}`,
+        `  이후: ${after.join(' / ') || '기록된 정보 없음'}`);
+    }
+  }
+  return [
+    `[취약점 점검 요청] ${item.id} · ${item.title}`,
+    '',
+    '담당 제품의 영향 여부를 확인하고 아래 양식으로 회신 부탁드립니다.',
+    '',
+    '[영향 범위 및 조건]',
+    `- 제품: ${item.product || [...new Set(affected.map((entry) => entry.product).filter(Boolean))].join(', ') || 'CNA 원문 참조'}`,
+    ...[...new Set(ranges)].map((range) => `- ${range}`),
+    ...(!ranges.length ? ['- 구조화된 영향 버전 미확인 · 원문 공지 참조'] : []),
+    ...conditions.map((condition) => `- ${condition}`),
+    '- 설치 버전과 빌드, 기능 활성화 여부, 외부 접근 가능 여부를 벤더 공지의 조건과 대조해 주세요.',
+    '',
+    '[패치 및 완화]',
+    `- 수정 버전: ${fixes.join(', ') || '수정 버전 미확인 · 원문 공지 참조'}`,
+    ...solutions.map((solution) => `- CNA 해결책: ${solution}`),
+    ...workarounds.map((workaround) => `- CNA 완화책: ${workaround}`),
+    ...(requiredAction ? [`- CISA KEV 조치 권고: ${requiredAction}`] : []),
+    ...changes,
+    ...(version ? ['', '[설치 버전 대조 참고]', version] : []),
+    '',
+    '[회신 양식]',
+    '- 제품 / 설치 버전·빌드:',
+    '- 영향 여부 (해당 / 미해당 / 추가 확인 필요) 및 판단 근거:',
+    '- 조치 계획 또는 미조치 사유 / 조치 예정일:',
+    '',
+    '[근거 링크]',
+    ...vendors.map((url) => `- 벤더 공지: ${url}`),
+    `- CNA: ${cna}`,
+    `- NVD: ${nvd}`,
+    ...(item.kev === true ? [`- CISA KEV: https://www.cisa.gov/known-exploited-vulnerabilities-catalog?search_api_fulltext=${encodeURIComponent(item.id)}`] : []),
+    `- Security Insight 상세: ${cveUrl(item.id)}`,
+  ].join('\n');
+}
+
+const requestDialog = $('#check-request-dialog');
+let requestDraft;
+
+function openCheckRequest(button, item) {
+  const panel = button.closest('.inspector');
+  const result = panel.querySelector('.version-result');
+  const fields = result?.closest('form').elements;
+  requestDraft = {
+    item,
+    comparison:reviewState(item) === 'recheck' ? remediationComparison(item, preferences.reviews[item.id]) : null,
+    version:result && !result.hidden ? [
+      `대조 제품: ${fields.product.selectedOptions[0].textContent.trim()}`,
+      `입력 버전: ${fields.version.value.trim()}`,
+      `설치 유형: ${fields.build.selectedOptions[0].textContent.trim()}`,
+      result.innerText.trim(),
+    ].join('\n') : '',
+  };
+  for (const key of ['comparison', 'version']) {
+    const option = requestDialog.querySelector(`[name="${key}"]`);
+    option.checked = false;
+    option.closest('label').hidden = !requestDraft[key];
+  }
+  updateCheckRequest();
+  requestDialog.showModal();
+}
+
+function updateCheckRequest() {
+  if (!requestDraft) return;
+  const {item, comparison, version} = requestDraft;
+  requestDialog.querySelector('textarea').value = checkRequestText(item, {
+    comparison:requestDialog.querySelector('[name="comparison"]').checked ? comparison : null,
+    version:requestDialog.querySelector('[name="version"]').checked ? version : '',
+  });
+  requestDialog.querySelector('[role="status"]').textContent = '';
+}
+
+requestDialog.addEventListener('change', updateCheckRequest);
+requestDialog.addEventListener('close', () => { requestDraft = null; });
+requestDialog.querySelector('[data-copy-request]').addEventListener('click', async () => {
+  const preview = requestDialog.querySelector('textarea');
+  const status = requestDialog.querySelector('[role="status"]');
+  try {
+    await navigator.clipboard.writeText(preview.value);
+    status.textContent = '점검 요청 문안을 복사했습니다.';
+  } catch {
+    preview.focus();
+    preview.select();
+    status.textContent = '선택된 문안을 복사해 주세요.';
+  }
+});
 
 async function copyCveLink(button, item) {
   const status = button.parentElement.querySelector('.copy-status');

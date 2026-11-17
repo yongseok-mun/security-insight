@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="description" content="CVE 우선순위, 영향 범위, 안전한 점검과 출처를 한 화면에서 확인하는 보안 인텔리전스 대시보드">
 <title>Security Insight</title>
-<link rel="stylesheet" href="style.css?v=list-2">
-<script src="app.js?v=list-2" defer></script>
+<link rel="stylesheet" href="style.css?v=brief-3">
+<script src="app.js?v=brief-3" defer></script>
 </head>
 <body>
 <header class="site-header"><div class="header-content">
@@ -21,17 +21,20 @@
   </nav>
 </div></header>
 <main>
+  <div class="status-bar">
+    <div class="update-times">
+      <span>마지막 업데이트 <time id="freshness">불러오는 중</time></span>
+      <span>다음 수집 예정 <time id="next-update">—</time> <span id="countdown" role="timer">—</span></span>
+    </div>
+    <button class="utility" id="open-email" type="button" disabled>HTML 메일 작성</button>
+  </div>
   <section class="priority" id="priority" aria-labelledby="priority-title" hidden>
     <h1 id="priority-title">오늘 먼저 확인할 항목</h1>
-    <div class="priority-content">
-      <div class="priority-copy"><span id="priority-id"></span><h2 id="priority-name"></h2><p id="priority-reason"></p></div>
-      <div class="hero-metrics"><div>CVSS<strong id="hero-cvss"></strong></div><div>EPSS<strong id="hero-epss"></strong></div></div>
-      <div class="actions"><button class="accent" id="top-check"><span data-icon="shield"></span>안전한 점검</button><button class="outline" id="top-source"><span data-icon="link"></span>출처 확인</button></div>
-    </div>
+    <ol class="priority-list" id="priority-list"></ol>
   </section>
   <section id="workspace" aria-labelledby="page-title">
     <header class="page-heading">
-      <h2 id="page-title">보안 브리핑</h2><time id="freshness" aria-live="polite">수집 데이터 불러오는 중</time>
+      <h2 id="page-title">보안 브리핑</h2>
     </header>
     <section id="overview" class="overview" aria-label="오늘의 보안 동향"></section>
     <div id="cve-view" hidden>
@@ -60,6 +63,18 @@
 <dialog id="guide" aria-labelledby="guide-title">
   <form method="dialog" class="close"><button aria-label="닫기">×</button></form>
   <div id="guide-content"></div>
+</dialog>
+<dialog id="email-dialog" aria-labelledby="email-title">
+  <form method="dialog" class="close"><button aria-label="닫기">×</button></form>
+  <h2 id="email-title">HTML 메일 작성</h2>
+  <p id="email-scope"></p>
+  <form id="email-form">
+    <label for="email-address">받는 사람</label>
+    <input id="email-address" type="email" required maxlength="254" autocomplete="email" placeholder="name@example.com">
+    <button type="submit" class="utility">메일 초안 다운로드</button>
+  </form>
+  <p class="feed-note">받는 사람을 입력하면 HTML 메일 초안 파일을 내려받습니다. 메일 앱에서 열고 발송하세요.</p>
+  <iframe id="email-preview" title="메일 미리보기" sandbox=""></iframe>
 </dialog>
 </body>
 </html>

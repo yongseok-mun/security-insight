@@ -47,7 +47,9 @@ const link = (address, label) => {
 
 let data = {cves:[], news:[], sources:{}};
 let selected;
-let priority;
+let priorities = [];
+let newsMode = 'recent';
+let mailDraft;
 let page = 'home';
 let view = 'latest';
 const newest = (a, b) => (Date.parse(b.published) || 0) - (Date.parse(a.published) || 0)
@@ -69,15 +71,36 @@ function rowsForFilters() {
 }
 
 function renderPriority() {
-  if (!priority) return;
-  $('#priority-id').textContent = priority.id;
-  $('#priority-name').textContent = priority.title;
-  $('#priority-reason').textContent = priority.kev === true
-    ? 'KEV 등재 · 사용 여부와 외부 노출 확인'
-    : '수집 목록 내 CVSS 상위 · 사용 여부와 외부 노출 확인';
-  $('#hero-cvss').textContent = cvss(priority);
-  $('#hero-epss').textContent = epss(priority);
-  $('#priority').hidden = false;
+  $('#priority').hidden = priorities.length === 0;
+  $('#priority-list').innerHTML = priorities.map((item) => `
+    <li><button type="button" class="priority-row" data-cve="${escape(item.id)}">
+      <span class="priority-copy"><span>${escape(item.id)}</span><strong>${escape(item.title)}</strong></span>
+      <span class="cve-meta">
+        ${item.kev === true ? '<span class="pill kev">KEV</span>' : ''}
+        <span class="pill">CVSS ${cvss(item)}</span>
+        <span class="pill">EPSS ${epss(item)}</span>
+      </span>
+      <span class="priority-detail">상세 보기 <span aria-hidden="true">→</span></span>
+    </button></li>`).join('');
+}
+
+// The Pages workflow starts at minute 17 on every even UTC hour.
+function updateClock(stamp) {
+  const collected = new Date(stamp);
+  const next = new Date(collected);
+  next.setUTCHours(Math.floor(next.getUTCHours() / 2) * 2, 17, 0, 0);
+  if (next <= collected) next.setUTCHours(next.getUTCHours() + 2);
+  $('#next-update').dateTime = next.toISOString();
+  $('#next-update').textContent = date(next);
+  const tick = () => {
+    const seconds = Math.max(0, Math.ceil((next - Date.now()) / 1000));
+    const parts = [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60];
+    $('#countdown').textContent = seconds
+      ? parts.map((part) => String(part).padStart(2, '0')).join(':')
+      : '갱신 대기';
+  };
+  tick();
+  setInterval(tick, 1000);
 }
 
 function renderRows() {
@@ -153,6 +176,8 @@ function renderInspector() {
       <dt>CVSS 제공처</dt><dd>${escape(item.cvssSource || '미확인')}</dd>
       <dt>공개 시각</dt><dd>${escape(date(item.published))}</dd>
     </dl>
+    <h3>취약점 설명</h3>
+    <p class="cve-summary">${escape(item.description || '수집된 NVD 설명이 없습니다.')}</p>
     <h3>출처 확인</h3>
     <div id="source-list">${evidence(item)}</div>
     <div class="actions">
@@ -199,25 +224,68 @@ function renderOverview() {
     </section>`;
 }
 
-function renderFeed() {
-  const feeds = data.news.filter((article) => {
+const newsTopics = [
+  ['랜섬웨어·다크웹', /랜섬웨어|다크웹|ransomware|dark.?web/i],
+  ['침해·정보유출', /유출|해킹|침해|탈취|breach|data leak|stolen|compromise/i],
+  ['취약점·패치', /CVE-|취약점|업데이트 권고|패치|vulnerabilit|patch|zero.day/i],
+  ['악성코드·피싱', /악성코드|피싱|malware|phishing|trojan|botnet/i],
+  ['AI·클라우드', /인공지능|클라우드|\bAI\b|cloud|챗GPT|ChatGPT/i],
+];
+const topic = (item) => newsTopics.find(([, pattern]) => pattern.test(item.title))?.[0] || '기타 보안 소식';
+
+function newsForPage() {
+  return data.news.filter((article) => {
     if (page === 'korea') return article.korea;
     if (page === 'dark') return article.dark;
     if (page === 'issues') return article.kind === 'advisory' || article.cves.length > 0;
     return true;
   });
-  const sourceNames = [...new Set(feeds.map((article) => article.publisher))].sort();
+}
+
+function filteredNews() {
+  const name = $('#feed-source')?.value;
+  const terms = ($('#news-query')?.value || '').trim().toLowerCase().split(/\s+/).filter(Boolean);
+  return newsForPage().filter((item) => (!name || name === item.publisher)
+    && terms.every((term) => `${item.title} ${item.publisher} ${topic(item)}`.toLowerCase().includes(term)));
+}
+
+function renderFeed() {
+  const sourceNames = [...new Set(newsForPage().map((article) => article.publisher))].sort();
   $('#feed').innerHTML = `
     ${page === 'dark' ? '<p class="feed-note">공개 언론의 다크웹·랜섬웨어 관련 보도입니다. 개별 주장은 원문에서 확인하세요.</p>' : ''}
-    <label class="feed-filter">매체<select id="feed-source"><option value="">전체 매체</option>${sourceNames.map((name) => `<option>${escape(name)}</option>`).join('')}</select></label>
+    <div class="news-toolbar">
+      <div class="presets" role="group" aria-label="뉴스 보기">
+        <button type="button" data-news="recent">최신순</button><button type="button" data-news="topic">키워드별</button>
+      </div>
+      <label class="search"><input id="news-query" type="search" aria-label="뉴스 키워드" placeholder="뉴스 키워드 검색"></label>
+      <label class="feed-filter">매체<select id="feed-source"><option value="">전체 매체</option>${sourceNames.map((name) => `<option>${escape(name)}</option>`).join('')}</select></label>
+    </div>
     <div id="articles"></div>`;
+  const article = (item) => `<article>
+    <small>${escape(item.publisher)} · ${escape(date(item.date))}${item.kind === 'aggregated' ? ' · Google 뉴스 경유' : ''}</small>
+    <h3>${link(item.url, item.title)}</h3></article>`;
   const display = () => {
-    const name = $('#feed-source').value;
-    $('#articles').innerHTML = feeds.filter((item) => !name || name === item.publisher).map((item) => `
-      <article><small>${escape(item.publisher)} · ${escape(date(item.date))}${item.kind === 'aggregated' ? ' · Google 뉴스 경유' : ''}</small>
-      <h3>${link(item.url, item.title)}</h3></article>`).join('') || '<p>수집된 기사가 없습니다.</p>';
+    const items = filteredNews();
+    document.querySelectorAll('[data-news]').forEach((button) =>
+      button.setAttribute('aria-pressed', String(button.dataset.news === newsMode)));
+    const groups = new Map();
+    if (newsMode === 'topic') {
+      for (const item of items) {
+        const name = topic(item);
+        if (!groups.has(name)) groups.set(name, []);
+        groups.get(name).push(item);
+      }
+    }
+    $('#articles').innerHTML = (newsMode === 'topic' ? [...groups].map(([name, entries]) =>
+      `<section class="news-topic"><h3>${escape(name)} <span>${entries.length}건</span></h3>${entries.map(article).join('')}</section>`).join('')
+      : items.map(article).join('')) || '<p>조건에 맞는 기사가 없습니다.</p>';
   };
+  document.querySelectorAll('[data-news]').forEach((button) => button.addEventListener('click', () => {
+    newsMode = button.dataset.news;
+    display();
+  }));
   $('#feed-source').addEventListener('change', display);
+  $('#news-query').addEventListener('input', display);
   display();
 }
 
@@ -263,27 +331,96 @@ $('#inspector').addEventListener('click', (event) => {
   const button = event.target.closest('[data-guide]');
   if (button) showGuide(selected, button.dataset.guide);
 });
+function openCve(id) {
+  $('#filters').reset();
+  view = 'latest';
+  showPage('cve');
+  selectItem(id);
+  $('#inspector h2')?.focus();
+}
+
 $('#overview').addEventListener('click', (event) => {
   const section = event.target.closest('[data-open]');
   if (section) showPage(section.dataset.open);
   const item = event.target.closest('[data-cve]');
-  if (item) {
-    $('#filters').reset();
-    view = 'latest';
-    showPage('cve');
-    selectItem(item.dataset.cve);
-    $('#inspector h2').focus();
-  }
+  if (item) openCve(item.dataset.cve);
 });
-$('#top-check').addEventListener('click', () => showGuide(priority, 'check'));
-$('#top-source').addEventListener('click', () => {
-  showPage('cve');
-  $('#filters').reset();
-  view = 'latest';
-  selectItem(priority.id);
-  const disclosure = $('#source-list details');
-  disclosure.open = true;
-  disclosure.querySelector('summary').focus();
+$('#priority-list').addEventListener('click', (event) => {
+  const item = event.target.closest('[data-cve]');
+  if (item) openCve(item.dataset.cve);
+});
+
+function buildMail() {
+  const sections = [];
+  const cves = page === 'home' ? priorities : page === 'cve' ? (selected ? [selected] : rowsForFilters()) : [];
+  if (cves.length) sections.push(['우선 확인할 CVE', cves.map((item) => ({
+    title: `${item.id} · ${item.title}`,
+    meta: `CVSS ${cvss(item)} · EPSS ${epss(item)} · KEV ${kev(item)}`,
+    url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(item.id)}`,
+    note: item.fixes.length ? `수정 버전 ${item.fixes.join(', ')}` : '',
+  }))]);
+  if (page !== 'cve') {
+    const articles = (page === 'home' ? data.news.slice(0, 8) : filteredNews()).map((item) => ({
+      title:item.title, meta:`${item.publisher} · ${date(item.date)}`, url:item.url,
+    }));
+    if (articles.length) sections.push([page === 'home' ? '최신 보안 소식' : labels[page], articles]);
+  }
+  const title = `Security Insight · ${labels[page]}`;
+  const stamp = `마지막 업데이트 ${date(data.updatedAt)}`;
+  const plain = [title, stamp, ...sections.flatMap(([heading, entries]) =>
+    [heading, ...entries.map((item) => [item.title, item.meta, item.note, item.url].filter(Boolean).join('\n'))])].join('\n\n');
+  const markup = `<!doctype html><html lang="ko"><head><meta charset="utf-8"></head>
+    <body style="margin:0;background:#f4f3f5;color:#201e24;font-family:Arial,sans-serif">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="18" style="max-width:680px;margin:auto">
+    <tr><td style="background:#241822;color:#fff;border-top:4px solid #ec5998">
+    <h1 style="font-size:22px;margin:4px 0">${escape(title)}</h1><p style="margin:4px 0;color:#efc6d8">${escape(stamp)}</p></td></tr>
+    ${sections.map(([heading, entries]) => `<tr><td style="background:#fff"><h2 style="font-size:17px">${escape(heading)}</h2>
+      ${entries.map((item) => `<div style="border-top:1px solid #e1dee3;padding:10px 0">
+      <strong>${link(item.url, item.title) || escape(item.title)}</strong>
+      <p style="font-size:12px;color:#595361;margin:5px 0">${escape(item.meta)}${item.note ? ` · ${escape(item.note)}` : ''}</p></div>`).join('')}
+      </td></tr>`).join('')}
+    <tr><td style="font-size:12px;color:#595361">${link(location.href, 'Security Insight 열기')}</td></tr>
+    </table></body></html>`;
+  return {title, plain, markup, count:sections.reduce((sum, [, items]) => sum + items.length, 0)};
+}
+
+$('#open-email').addEventListener('click', () => {
+  mailDraft = buildMail();
+  $('#email-scope').textContent = `${labels[page]} · ${mailDraft.count}건`;
+  $('#email-preview').srcdoc = mailDraft.markup;
+  $('#email-dialog').showModal();
+});
+
+function base64(value) {
+  const bytes = new TextEncoder().encode(value);
+  const blocks = [];
+  for (let i = 0; i < bytes.length; i += 0x4000) {
+    blocks.push(String.fromCharCode(...bytes.subarray(i, i + 0x4000)));
+  }
+  return btoa(blocks.join(''));
+}
+
+$('#email-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const address = $('#email-address').value.trim();
+  if (!mailDraft || !/^[^\s<>,;:"]+@[^\s<>,;:"]+$/.test(address)) return;
+  const boundary = `SecurityInsight-${Date.now()}`;
+  const wrapped = (value) => base64(value).match(/.{1,76}/g).join('\r\n');
+  const sections = [['text/plain', mailDraft.plain], ['text/html', mailDraft.markup]];
+  const encodedSubject = mailDraft.title.split(' · ').map((part) => `=?UTF-8?B?${base64(part)}?=`).join(' / ');
+  const message = [
+    'X-Unsent: 1', `To: ${address}`, `Subject: ${encodedSubject}`, 'MIME-Version: 1.0',
+    `Content-Type: multipart/alternative; boundary="${boundary}"`, '',
+    ...sections.flatMap(([type, body]) => [`--${boundary}`, `Content-Type: ${type}; charset=UTF-8`,
+      'Content-Transfer-Encoding: base64', '', wrapped(body), '']),
+    `--${boundary}--`, '',
+  ].join('\r\n');
+  const url = URL.createObjectURL(new Blob([message], {type:'message/rfc822'}));
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = 'security-insight.eml';
+  anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
 });
 
 async function load() {
@@ -291,10 +428,12 @@ async function load() {
     const response = await fetch('./data.json', {cache:'no-cache'});
     if (!response.ok) throw Error(`Snapshot HTTP ${response.status}`);
     data = await response.json();
-    priority = [...data.cves].sort(comparePriority)[0];
+    priorities = [...data.cves].sort(comparePriority).slice(0, 3);
     const stamp = $('#freshness');
     stamp.dateTime = data.updatedAt;
-    stamp.textContent = `수집 ${date(data.updatedAt)}`;
+    stamp.textContent = date(data.updatedAt);
+    updateClock(data.updatedAt);
+    $('#open-email').disabled = false;
     const states = {ok:'수집', stale:'이전 데이터', unavailable:'수집 실패'};
     $('#source-status-list').innerHTML = Object.entries(data.sources).map(([name, status]) =>
       `<li>${escape(name)} <span>${states[status.state]} · ${status.count}건${status.at ? ` · ${escape(date(status.at))}` : ''}</span></li>`).join('');
@@ -303,7 +442,7 @@ async function load() {
     renderPriority();
     renderRows();
     if (page === 'home') renderOverview();
-  else if (page !== 'cve') renderFeed();
+    else if (page !== 'cve') renderFeed();
   } catch (error) {
     $('#freshness').textContent = '데이터를 불러오지 못했습니다. 새로고침해 주세요.';
     console.error(error);

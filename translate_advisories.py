@@ -15,6 +15,12 @@ MODEL = 'Neurora/opus-hplt-en-ko-v2.0'
 REVISION = '06f3f7b03a97728560826d7387e1ea25224c65a9'
 HANGUL = re.compile(r'[가-힣]{2}')
 NUMBERS = re.compile(r'\d+(?:\.\d+)*')
+CODE_IDENTIFIERS = re.compile(
+    r'(?<![\w/])(?:/[A-Za-z0-9_.:-]+){2,}\b'
+    r'|\b[A-Za-z0-9]+(?:_[A-Za-z0-9]+)+\b'
+    r'|\b[A-Za-z_]\w*::[A-Za-z_]\w*\b'
+    r'|\b[\w-]+\.(?:php|sh|js|xml|conf)\b'
+)
 TECHNICAL_TERMS = {
     r'privilege escalation|\bLPE\b': r'권한|\bLPE\b',
     r'\bcommands?\b': r'명령|커맨드',
@@ -45,6 +51,7 @@ def source_key(text):
 def valid_translation(source, translated):
     return (isinstance(translated, str) and bool(HANGUL.search(translated))
             and Counter(NUMBERS.findall(source)) == Counter(NUMBERS.findall(translated))
+            and all(identifier in translated for identifier in CODE_IDENTIFIERS.findall(source))
             and all(not re.search(english, source, re.I) or re.search(korean, translated, re.I)
                     for english, korean in TECHNICAL_TERMS.items()))
 

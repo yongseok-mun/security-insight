@@ -1013,6 +1013,8 @@ const advisoryTypes = [
 const containsKorean = (value) => /[가-힣]{2}/.test(value || '');
 const koreanText = (source, translations) => containsKorean(source) ? source : translations.get(source);
 const englishDescription = (item) => item.descriptionEn || item.description;
+const publishedAdvisoryTranslations = (item) =>
+  item.advisoryKoRevision === '67b328077e6187b0078311212427d0b6c5d9683a' ? item.advisoryKo || [] : [];
 
 function advisoryChanges(comparison) {
   if (!comparison) return [];
@@ -1074,7 +1076,8 @@ function advisoryText(item, {comparison, version, translations = new Map()} = {}
   const title = item.titleKo || koreanText(item.title, translations) || [product, type].filter(Boolean).join(' ');
   const original = englishDescription(item);
   const description = item.descriptionKo || koreanText(original, translations);
-  const publishedTranslation = (item.advisoryKo || []).some(([source]) => source === original);
+  const publishedTranslations = publishedAdvisoryTranslations(item);
+  const publishedTranslation = publishedTranslations.some(([source]) => source === original);
   const descriptionSource = item.descriptionKo ? item.translationSource
     : translations.has(original) ? (publishedTranslation ? '배포 전 기계 번역' : '브라우저 기계 번역') : '';
   const structuredOverview = product && types.length ? `${product}의 ${type}에 대한 공개 공지입니다.`
@@ -1126,7 +1129,7 @@ function advisoryText(item, {comparison, version, translations = new Map()} = {}
     `- NVD: ${nvd}`,
     ...(item.kev === true ? [`- CISA KEV: https://www.cisa.gov/known-exploited-vulnerabilities-catalog?search_api_fulltext=${encodeURIComponent(item.id)}`] : []),
     `- Security Insight 상세: ${cveUrl(item.id)}`,
-    ...(item.advisoryKo?.length ? [
+    ...(publishedTranslations.length ? [
       '- 배포 전 기계 번역: Helsinki-NLP OPUS-MT (CC BY 4.0) https://huggingface.co/Helsinki-NLP/opus-mt-tc-big-en-ko',
       '- 기계 번역된 설명과 조치 문장은 배포 전 벤더 원문과 대조해 주세요.',
     ] : []),
@@ -1144,7 +1147,7 @@ function openAdvisory(button, item) {
   advisoryDraft = {
     item,
     comparison:reviewState(item) === 'recheck' ? remediationComparison(item, preferences.reviews[item.id]) : null,
-    translations:new Map(item.advisoryKo || []),
+    translations:new Map(publishedAdvisoryTranslations(item)),
     version:summary ? [
       `대조 제품: ${fields.product.selectedOptions[0].textContent.trim()}`,
       `설치 유형: ${fields.build.selectedOptions[0].textContent.trim()}`,

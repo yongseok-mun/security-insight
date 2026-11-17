@@ -13,9 +13,15 @@ from collect import clean
 ROOT = Path(__file__).resolve().parent
 MODEL = 'Helsinki-NLP/opus-mt-tc-big-en-ko'
 REVISION = 'ae8606b7b29a495f31ce679cee2007f536a3a5ce'
-CACHE_VERSION = '1'
+TOKENIZER_REVISION = '67b328077e6187b0078311212427d0b6c5d9683a'
 HANGUL = re.compile(r'[가-힣]{2}')
 NUMBERS = re.compile(r'\d+(?:\.\d+)*')
+TECHNICAL_TERMS = {
+    r'privilege escalation|\bLPE\b': r'권한|\bLPE\b',
+    r'\bcommands?\b': r'명령|커맨드',
+    r'\b(?:authentication|authorization)\b': r'인증|인가|권한',
+    r'\b(?:vulnerable|vulnerability)\b': r'취약|보안 결함',
+}
 LIMIT = 140
 
 
@@ -33,12 +39,14 @@ def advisory_sources(item):
 
 
 def source_key(text):
-    return hashlib.sha256(f'{REVISION}:{CACHE_VERSION}:{text}'.encode('utf-8')).hexdigest()
+    return hashlib.sha256(f'{REVISION}:{TOKENIZER_REVISION}:{text}'.encode('utf-8')).hexdigest()
 
 
 def valid_translation(source, translated):
     return (isinstance(translated, str) and bool(HANGUL.search(translated))
-            and Counter(NUMBERS.findall(source)) == Counter(NUMBERS.findall(translated)))
+            and Counter(NUMBERS.findall(source)) == Counter(NUMBERS.findall(translated))
+            and all(not re.search(english, source, re.I) or re.search(korean, translated, re.I)
+                    for english, korean in TECHNICAL_TERMS.items()))
 
 
 def translate(sources):
@@ -47,8 +55,15 @@ def translate(sources):
 
     deadline = time.monotonic() + 150
     torch.set_num_threads(2)
-    tokenizer = AutoTokenizer.from_pretrained(MODEL, revision=REVISION)
+    # The released checkpoint requires separate source and target vocabularies.
+    tokenizer = AutoTokenizer.from_pretrained(MODEL, revision=TOKENIZER_REVISION)
     model = AutoModelForSeq2SeqLM.from_pretrained(MODEL, revision=REVISION, use_safetensors=True).eval()
+    canary = 'An attacker can execute commands as root.'
+    with torch.inference_mode():
+        output = model.generate(**tokenizer(canary, return_tensors='pt'), max_new_tokens=48)
+    translated = tokenizer.decode(output[0], skip_special_tokens=True)
+    if not valid_translation(canary, translated) or not re.search(r'root|루트|관리자', translated, re.I):
+        raise ValueError('Korean model failed the security terminology smoke test')
     for index in range(0, len(sources), 8):
         if time.monotonic() >= deadline:
             break
@@ -105,8 +120,10 @@ def enrich(snapshot, previous, translator=translate):
         translations = [[text, cache[hashes[text]]] for text in texts if cache.get(hashes[text])]
         if translations:
             record['advisoryKo'] = translations
+            record['advisoryKoRevision'] = TOKENIZER_REVISION
         else:
             record.pop('advisoryKo', None)
+            record.pop('advisoryKoRevision', None)
     return cache
 
 

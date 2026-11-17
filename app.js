@@ -18,186 +18,288 @@ const $ = (selector) => document.querySelector(selector);
 document.querySelectorAll('[data-icon]').forEach((node) => {
   node.innerHTML = icon(node.dataset.icon);
 });
-document.querySelectorAll('.priority li').forEach((node) => {
-  node.insertAdjacentHTML('afterbegin', icon('check'));
+
+const escape = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+})[char]);
+
+const dateFormat = new Intl.DateTimeFormat('ko-KR', {
+  timeZone: 'Asia/Seoul', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+  hourCycle: 'h23',
 });
-
-const vulnerabilities = [
-  ['게이트웨이 인증 우회',9.8,82,true,'게이트웨이','Example Networks','3.4.2','인증 우회','관리 인터페이스에 접근해 설정을 변경하거나 정보를 조회할 수 있습니다.'],
-  ['웹 관리자 페이지 명령 실행',9.6,76,true,'웹 관리자','Example Web','2.8.0','명령 실행','관리 서비스 권한으로 명령이 실행될 수 있습니다.'],
-  ['원격 코드 실행 (RCE)',9.6,71,false,'API 서버','Example Web','1.9.0','원격 코드 실행','API 프로세스 권한으로 코드가 실행될 수 있습니다.'],
-  ['권한 상승',9.1,58,true,'접근 관리','Example Identity','5.2.1','권한 상승','기존 계정에 관리자 권한이 부여될 수 있습니다.'],
-  ['경로 탐색을 통한 파일 접근',9.0,55,false,'파일 서버','Example Files','4.1.0','경로 탐색','서비스에서 읽을 수 있는 파일이 노출될 수 있습니다.'],
-  ['관리자 기능 인증 우회',8.8,49,false,'웹 관리자','Example Web','2.8.0','인증 우회','관리자 전용 기능이 노출될 수 있습니다.'],
-  ['서비스 거부 (DoS)',7.5,35,false,'게이트웨이','Example Networks','3.4.2','서비스 거부','게이트웨이 요청 처리가 중단될 수 있습니다.'],
-  ['민감 정보 노출',7.5,28,false,'파일 서버','Example Files','4.1.0','정보 노출','운영 설정이 조회될 수 있습니다.'],
-  ['크로스 사이트 스크립팅 (XSS)',6.5,18,false,'웹 관리자','Example Web','2.8.0','XSS','사용자 브라우저에서 스크립트가 실행될 수 있습니다.'],
-  ['설정 오류에 의한 정보 노출',6.3,12,false,'접근 관리','Example Identity','5.2.1','정보 노출','진단 정보가 노출될 수 있습니다.'],
-].map(([title, cvss, epss, kev, product, vendor, version, type, impact], index) => ({
-  id: `예시 CVE ${String.fromCharCode(65 + index)}`, title, cvss, epss, kev, product, vendor, version, type, impact,
-}));
-
-const sources = [
-  {name:'벤더 공지', icon:'doc', detail:'제품별 영향 버전, 수정 빌드 및 완화책의 근거입니다. 이 예시에 연결된 실제 벤더 공지는 없습니다.'},
-  {name:'NVD', icon:'news', detail:'CVSS 버전과 벡터를 확인합니다. 표시된 점수는 시안 데이터입니다.', url:'https://nvd.nist.gov/vuln/search'},
-  {name:'FIRST EPSS', icon:'link', detail:'EPSS는 향후 30일 내 악용 가능성 추정치입니다. 이 예시에서 표시한 수치는 시안 데이터입니다.', url:'https://www.first.org/epss/'},
-  {name:'CISA KEV', icon:'shield', detail:'카탈로그 등록 상태를 확인합니다. 미등재 상태만으로 실제 악용 여부를 판단할 수 없습니다.', url:'https://www.cisa.gov/known-exploited-vulnerabilities-catalog'},
-];
-
-const feeds = {
-  news: {title:'실시간 뉴스', items:[['벤더 공지 예시','게이트웨이 보안 업데이트 배포','시안 기사 · 수집 연동 전']]},
-  issues: {title:'핵심 이슈', items:[['우선 점검 예시','외부에 노출된 관리 인터페이스 우선 확인','예시 CVE A 관련 점검']]},
-  korea: {title:'국내 동향', items:[['국내 공지 예시','네트워크 장비 보안 공지 모니터링','실제 기관 공지와 연결되면 원문을 표시합니다.']]},
-  dark: {title:'다크웹', items:[['미확인 제보 예시','게이트웨이 공격 도구 거래 주장','원출처와 독립적인 근거가 확인될 때까지 미확인으로 표시합니다.']]},
+const date = (value) => value ? `${dateFormat.format(new Date(value))} KST` : '시각 미제공';
+const cvss = (item) => Number.isFinite(item.cvss) ? item.cvss.toFixed(1) : '—';
+const epss = (item) => item.epss ? `${item.epss.score}%` : '—';
+const kev = (item) => item.kev === true ? '등재' : item.kev === false ? '미등재' : '미확인';
+const labels = {home:'보안 브리핑', news:'보안 뉴스', issues:'핵심 이슈', korea:'국내 동향', cve:'CVE 우선순위', dark:'다크웹 보도'};
+const comparePriority = (a, b) => Number(b.kev === true) - Number(a.kev === true)
+  || (b.cvss ?? -1) - (a.cvss ?? -1) || (b.epss?.score ?? -1) - (a.epss?.score ?? -1)
+  || (b.published || '').localeCompare(a.published || '');
+const link = (address, label) => {
+  try {
+    const parsed = new URL(address);
+    if (['https:', 'http:'].includes(parsed.protocol) && !parsed.username && !parsed.password) {
+      return `<a href="${escape(parsed.href)}" target="_blank" rel="noopener noreferrer">${escape(label)} ↗</a>`;
+    }
+  } catch { /* The upstream record may have no URL. */ }
+  return '';
 };
 
-const filters = ['product', 'vendor', 'version'];
-const filterLabels = {product:'제품', vendor:'벤더', version:'버전'};
-const priority = vulnerabilities[0];
-let selected = priority;
-let sort = {key:'cvss', direction:-1};
+let data = {cves:[], news:[], sources:{}};
+let selected;
+let priority;
+let page = 'home';
+let sort = {key:null, direction:-1};
+const metricValue = {
+  cvss: (item) => item.cvss,
+  epss: (item) => item.epss?.score,
+  kev: (item) => item.kev == null ? null : Number(item.kev),
+};
 
-for (const key of filters) {
-  const select = $(`#${key}`);
-  select.add(new Option(`모든 ${filterLabels[key]}`, ''));
-  const values = [...new Set(vulnerabilities.map((item) => item[key]))].sort();
-  values.forEach((value) => select.add(new Option(value, value)));
+function rowsForFilters() {
+  const terms = $('#query').value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const product = $('#product').value;
+  const rows = data.cves.filter((item) => {
+    const text = [item.id, item.title, item.product, ...item.fixes, item.description].join(' ').toLowerCase();
+    return terms.every((term) => text.includes(term))
+      && (!$('#kev').checked || item.kev === true) && (!product || item.product === product);
+  });
+  const value = metricValue[sort.key];
+  return rows.sort((a, b) => {
+    if (!value) return comparePriority(a, b);
+    const first = value(a);
+    const second = value(b);
+    if (first == null) return second == null ? comparePriority(a, b) : 1;
+    if (second == null) return -1;
+    return (first - second) * sort.direction || comparePriority(a, b);
+  });
 }
 
-function filteredRecords() {
-  const query = $('#query').value.trim().toLowerCase();
-  return vulnerabilities.filter((item) => {
-    const text = Object.values(item).join(' ').toLowerCase();
-    return text.includes(query) && (!$('#kev').checked || item.kev)
-      && filters.every((key) => !$(`#${key}`).value || item[key] === $(`#${key}`).value);
-  }).sort((a, b) => (a[sort.key] - b[sort.key]) * sort.direction);
+function renderPriority() {
+  if (!priority) return;
+  $('#priority-id').textContent = priority.id;
+  $('#priority-name').textContent = priority.title;
+  $('#priority-reason').textContent = priority.kev === true
+    ? 'KEV 등재 · 사용 여부와 외부 노출 확인'
+    : '수집 목록 내 CVSS 상위 · 사용 여부와 외부 노출 확인';
+  $('#hero-cvss').textContent = cvss(priority);
+  $('#hero-epss').textContent = epss(priority);
+  $('#priority').hidden = false;
 }
 
-function kevPill(item) {
-  return `<span class="pill ${item.kev ? 'critical' : ''}">${item.kev ? '등재' : '미등재'}</span>`;
-}
-
-function renderRows(records) {
-  const rows = $('#rows');
-  rows.innerHTML = records.map((item) => {
+function renderRows() {
+  const records = rowsForFilters();
+  if (!records.includes(selected)) selected = records[0];
+  $('#rows').innerHTML = records.map((item) => {
     const active = item === selected;
     const severity = item.cvss >= 9 ? 'critical' : item.cvss >= 7 ? 'high' : '';
     return `<tr class="${active ? 'selected' : ''}">
-      <td><button type="button" aria-pressed="${active}" data-id="${item.id}"><strong>${item.id}</strong><small>${item.title}</small></button></td>
-      <td><span class="pill ${severity}">${item.cvss.toFixed(1)}</span></td><td>${item.epss}%</td><td>${kevPill(item)}</td>
+      <td><button type="button" aria-pressed="${active}" data-id="${escape(item.id)}"><strong>${escape(item.id)}</strong><small>${escape(item.title)}</small></button></td>
+      <td><span class="pill ${severity}">${cvss(item)}</span></td><td>${epss(item)}</td>
+      <td><span class="pill ${item.kev === true ? 'critical' : ''}">${kev(item)}</span></td>
     </tr>`;
   }).join('') || '<tr><td class="empty" colspan="4">조건에 맞는 CVE가 없습니다.</td></tr>';
-  $('#count').textContent = `총 ${records.length}건 (시안 데이터)`;
+  $('#count').textContent = `총 ${records.length}건`;
+  document.querySelectorAll('[data-sort]').forEach((button) => {
+    const active = button.dataset.sort === sort.key;
+    button.querySelector('span').textContent = active ? (sort.direction === 1 ? '↑' : '↓') : '';
+    button.closest('th').setAttribute('aria-sort', active ? (sort.direction === 1 ? 'ascending' : 'descending') : 'none');
+  });
+  renderInspector();
 }
 
-function renderInspector(item) {
+function evidence(item) {
+  const sources = [
+    ['cve.now', item.url, '피드에 게시된 제목·발행일·제품 정보'],
+    ['NVD', `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(item.id)}`, item.nvd
+      ? (item.nvdStatus || '레코드 수집') : '이번 수집 범위에서 레코드 미확인'],
+    ['FIRST EPSS', `https://api.first.org/data/v1/epss?cve=${encodeURIComponent(item.id)}`,
+      item.epss ? `점수 기준일 ${item.epss.date} · 향후 30일 악용 가능성 추정치` : '수집된 점수 없음'],
+    ['CISA KEV', `https://www.cisa.gov/known-exploited-vulnerabilities-catalog?search_api_fulltext=${encodeURIComponent(item.id)}`,
+      item.kevDate ? `등재일 ${item.kevDate}` : `카탈로그 상태 ${kev(item)}`],
+  ];
+  return sources.filter(([name]) => name !== 'cve.now' || item.origin !== 'CISA KEV').map(([name, address, note]) => `<details><summary>${icon('doc')}${name}</summary><p>${escape(note)} · ${link(address, '출처 열기')}</p></details>`).join('')
+    + item.references.map((address) => `<p class="evidence-link">${link(address, 'NVD 수록 벤더 공지·패치')}</p>`).join('')
+    + item.notices.map((notice) => `<p class="evidence-link">${link(notice.url, 'KISA · ' + notice.title)}</p>`).join('');
+}
+
+function renderInspector() {
   const panel = $('#inspector');
+  const item = selected;
   if (!item) {
-    panel.innerHTML = '<p class="empty">검색 조건을 바꾸면 상세 정보를 확인할 수 있습니다.</p>';
+    panel.innerHTML = '<p class="empty">표시할 CVE가 없습니다.</p>';
     return;
   }
   panel.innerHTML = `
-    <div class="eyebrow"><span>${item.id}</span>${item.kev ? '<span class="pill critical">KEV 등재</span>' : ''}</div>
-    <h2 tabindex="-1">${item.title}</h2>
+    <div class="eyebrow"><span>${escape(item.id)}</span>${item.kev === true ? '<span class="pill critical">KEV 등재</span>' : ''}</div>
+    <h2 tabindex="-1">${escape(item.title)}</h2>
     <div class="metrics">
-      <div>CVSS v3.1<strong>${item.cvss.toFixed(1)}</strong></div>
-      <div>EPSS<strong>${item.epss}%</strong></div>
-      <div>KEV<strong>${item.kev ? '등재' : '미등재'}</strong></div>
+      <div>CVSS ${item.cvssVersion ? `v${escape(item.cvssVersion)}` : ''}<strong>${cvss(item)}</strong></div>
+      <div>EPSS<strong>${epss(item)}</strong></div><div>KEV<strong>${kev(item)}</strong></div>
     </div>
     <h3>영향 범위</h3>
     <dl class="facts">
-      <dt>영향 제품</dt><dd>${item.vendor} ${item.product}</dd>
-      <dt>영향 버전</dt><dd>≤ ${item.version} (예시)</dd>
-      <dt>취약점 유형</dt><dd>${item.type}</dd>
-      <dt>주요 영향</dt><dd>${item.impact}</dd>
+      <dt>제품</dt><dd>${escape(item.product || '수집 정보 없음')}</dd>
+      <dt>수정 버전 정보</dt><dd>${escape(item.fixes.join(', ') || '벤더 공지 확인 필요')}</dd>
+      <dt>CVSS 제공처</dt><dd>${escape(item.cvssSource || '미확인')}</dd>
+      <dt>공개 시각</dt><dd>${escape(date(item.published))}</dd>
     </dl>
-    <h3>출처 검증</h3>
-    <div id="source-list">${sources.map((source) => `
-      <details><summary>${icon(source.icon)}${source.name}<small>시안 · 검증 전</small></summary>
-        <p>${source.detail} ${source.url ? `<a href="${source.url}" target="_blank" rel="noopener noreferrer">공식 사이트</a>` : ''}</p>
-      </details>`).join('')}</div>
+    <h3>출처 확인</h3>
+    <div id="source-list">${evidence(item)}</div>
     <div class="actions">
-      <button class="accent" data-guide="analysis">${icon('search')}심층 분석 보기</button>
+      <button class="accent" data-guide="analysis">${icon('search')}CVE 상세</button>
       <button class="outline" data-guide="check">${icon('shield')}안전한 점검</button>
     </div>`;
 }
 
-function render() {
-  const records = filteredRecords();
-  if (!records.includes(selected)) selected = records[0] || null;
-  renderRows(records);
-  renderInspector(selected);
-  document.querySelectorAll('[data-sort]').forEach((button) => {
-    const active = button.dataset.sort === sort.key;
-    button.querySelector('span').textContent = active && sort.direction === 1 ? '▴' : '▾';
-    button.closest('th').setAttribute('aria-sort', active ? (sort.direction === 1 ? 'ascending' : 'descending') : 'none');
-  });
-}
-
-function showPage(page) {
-  const cve = page === 'cve';
-  $('#cve-view').hidden = !cve;
-  $('#feed').hidden = cve;
-  $('#page-title').textContent = cve ? 'CVE 우선순위' : feeds[page].title;
+function showPage(name) {
+  page = name;
+  $('#cve-view').hidden = page !== 'cve';
+  $('#overview').hidden = page !== 'home';
+  $('#feed').hidden = page === 'cve' || page === 'home';
+  $('#page-title').textContent = labels[page];
   document.querySelectorAll('[data-page]').forEach((button) => {
     if (button.dataset.page === page) button.setAttribute('aria-current', 'page');
     else button.removeAttribute('aria-current');
   });
-  if (!cve) $('#feed').innerHTML = feeds[page].items.map(([label, title, copy]) =>
-    `<article><small>${label}</small><h3>${title}</h3><p>${copy}</p></article>`
-  ).join('');
+  if (page === 'home') renderOverview();
+  else if (page !== 'cve') renderFeed();
+}
+
+function renderOverview() {
+  const sections = [
+    ['issues', '핵심 이슈', data.news.filter((article) => article.kind === 'advisory' || article.cves.length)],
+    ['news', '최신 뉴스', data.news.filter((article) => article.kind !== 'advisory')],
+    ['korea', '보호나라 공지', data.news.filter((article) => article.kind === 'advisory')],
+    ['dark', '다크웹 보도', data.news.filter((article) => article.dark)],
+  ];
+  const view = $('#overview');
+  view.innerHTML = sections.map(([target, title, articles]) => `
+    <section class="digest">
+      <header><h3>${title}</h3><button data-open="${target}">전체 보기 <span aria-hidden="true">→</span></button></header>
+      ${articles.slice(0, 4).map((article) => `
+        <article><small>${escape(article.publisher)} · ${escape(date(article.date))}</small>
+        <h4>${link(article.url, article.title)}</h4></article>`).join('') || '<p>수집된 항목 없음</p>'}
+    </section>`).join('') + `
+    <section class="digest digest-cve">
+      <header><h3>CVE 우선순위</h3><button data-open="cve">전체 보기 <span aria-hidden="true">→</span></button></header>
+      ${[...data.cves].sort(comparePriority).slice(0, 5).map((item) => `
+        <button class="overview-cve" data-cve="${escape(item.id)}">
+          <small>${escape(item.id)}</small><span>${escape(item.title)}</span><span>CVSS ${cvss(item)} · KEV ${kev(item)}</span>
+        </button>`).join('') || '<p>수집된 CVE 없음</p>'}
+    </section>`;
+}
+
+function renderFeed() {
+  const feeds = data.news.filter((article) => {
+    if (page === 'korea') return article.korea;
+    if (page === 'dark') return article.dark;
+    if (page === 'issues') return article.kind === 'advisory' || article.cves.length > 0;
+    return true;
+  });
+  const sourceNames = [...new Set(feeds.map((article) => article.publisher))].sort();
+  $('#feed').innerHTML = `
+    ${page === 'dark' ? '<p class="feed-note">공개 언론의 다크웹·랜섬웨어 관련 보도입니다. 개별 주장은 원문에서 확인하세요.</p>' : ''}
+    <label class="feed-filter">매체<select id="feed-source"><option value="">전체 매체</option>${sourceNames.map((name) => `<option>${escape(name)}</option>`).join('')}</select></label>
+    <div id="articles"></div>`;
+  const display = () => {
+    const name = $('#feed-source').value;
+    $('#articles').innerHTML = feeds.filter((item) => !name || name === item.publisher).map((item) => `
+      <article><small>${escape(item.publisher)} · ${escape(date(item.date))}${item.kind === 'aggregated' ? ' · Google 뉴스 경유' : ''}</small>
+      <h3>${link(item.url, item.title)}</h3></article>`).join('') || '<p>수집된 기사가 없습니다.</p>';
+  };
+  $('#feed-source').addEventListener('change', display);
+  display();
 }
 
 function showGuide(item, mode) {
+  if (!item) return;
   const analysis = mode === 'analysis';
   $('#guide-content').innerHTML = `
-    <small class="demo">시안 데이터</small>
-    <h2 id="guide-title">${analysis ? 'CVE 심층 분석' : '안전한 점검'}</h2>
-    <p>${item.id} · ${item.title}</p>
-    ${analysis ? `<h3>공격 조건과 영향</h3><p>${item.vendor} ${item.product}의 영향을 받는 버전과 관련 기능의 활성화 여부를 확인합니다. ${item.impact}</p>` : ''}
+    <span class="eyebrow">${escape(item.id)}</span>
+    <h2 id="guide-title">${analysis ? 'CVE 상세' : '안전한 점검'}</h2>
+    <p>${escape(item.title)}</p>
+    ${analysis ? `<h3>NVD 설명</h3><p>${escape(item.description || '이번 수집에서 확보한 NVD 설명이 없습니다.')}</p>
+      ${item.vector ? `<code>${escape(item.vector)}</code>` : ''}` : ''}
     <h3>읽기 전용 점검 순서</h3>
     <ol>
-      <li>자산 목록에서 ${item.product}의 소유자와 인터넷 노출 여부를 확인합니다.</li>
-      <li>관리 콘솔의 시스템 정보 화면 또는 승인된 자산 수집 기록에서 제품 버전과 빌드를 조회합니다.</li>
-      <li>조회한 값을 벤더 공지의 영향 범위 및 수정 릴리스와 대조합니다. ${item.version}은 시안의 예시 버전입니다.</li>
+      <li>벤더 공지에서 영향 제품·기능·버전과 수정 릴리스를 확인합니다.</li>
+      <li>자산 목록 또는 관리 콘솔에서 해당 제품의 버전·빌드와 기능 활성화 여부를 조회합니다.</li>
+      <li>벤더 조건과 대조하고, 인터넷 노출이나 비인가 접근 가능성이 있는 자산부터 담당자를 확인합니다.</li>
     </ol>
-    ${analysis ? '<h3>대응 및 확인</h3><p>벤더 지침을 적용한 후 버전·빌드와 관리 인터페이스 노출 상태를 다시 확인합니다.</p>' : ''}`;
+    <h3>근거</h3>${evidence(item)}`;
   $('#guide').showModal();
 }
 
+function selectItem(id) {
+  selected = data.cves.find((item) => item.id === id);
+  renderRows();
+}
+
 $('#filters').addEventListener('submit', (event) => event.preventDefault());
-$('#filters').addEventListener('input', render);
+$('#filters').addEventListener('input', renderRows);
 $('#rows').addEventListener('click', (event) => {
   const button = event.target.closest('[data-id]');
   if (!button) return;
-  selected = vulnerabilities.find((item) => item.id === button.dataset.id);
-  render();
-  if (matchMedia('(max-width:730px)').matches) {
-    $('#inspector').scrollIntoView({block:'start'});
-    $('#inspector h2').focus({preventScroll:true});
-  } else {
-    [...document.querySelectorAll('[data-id]')].find((control) => control.dataset.id === selected.id).focus();
-  }
+  selectItem(button.dataset.id);
+  if (matchMedia('(max-width:730px)').matches) $('#inspector h2').focus();
+  else [...document.querySelectorAll('[data-id]')].find((control) => control.dataset.id === selected.id)?.focus();
 });
 document.querySelectorAll('[data-sort]').forEach((button) => button.addEventListener('click', () => {
   const key = button.dataset.sort;
   sort = {key, direction:sort.key === key ? -sort.direction : -1};
-  render();
+  renderRows();
 }));
 document.querySelectorAll('[data-page]').forEach((button) => button.addEventListener('click', () => showPage(button.dataset.page)));
 $('#inspector').addEventListener('click', (event) => {
   const button = event.target.closest('[data-guide]');
-  if (button && selected) showGuide(selected, button.dataset.guide);
+  if (button) showGuide(selected, button.dataset.guide);
+});
+$('#overview').addEventListener('click', (event) => {
+  const section = event.target.closest('[data-open]');
+  if (section) showPage(section.dataset.open);
+  const item = event.target.closest('[data-cve]');
+  if (item) {
+    $('#filters').reset();
+    showPage('cve');
+    selectItem(item.dataset.cve);
+    $('#inspector h2').focus();
+  }
 });
 $('#top-check').addEventListener('click', () => showGuide(priority, 'check'));
 $('#top-source').addEventListener('click', () => {
   showPage('cve');
   $('#filters').reset();
-  selected = priority;
-  render();
+  selectItem(priority.id);
   const disclosure = $('#source-list details');
   disclosure.open = true;
   disclosure.querySelector('summary').focus();
 });
 
-render();
+async function load() {
+  try {
+    const response = await fetch('./data.json', {cache:'no-cache'});
+    if (!response.ok) throw Error(`Snapshot HTTP ${response.status}`);
+    data = await response.json();
+    priority = [...data.cves].sort(comparePriority)[0];
+    const stamp = $('#freshness');
+    stamp.dateTime = data.updatedAt;
+    stamp.textContent = `수집 ${date(data.updatedAt)}`;
+    const states = {ok:'수집', stale:'이전 데이터', unavailable:'수집 실패'};
+    $('#source-status-list').innerHTML = Object.entries(data.sources).map(([name, status]) =>
+      `<li>${escape(name)} <span>${states[status.state]} · ${status.count}건${status.at ? ` · ${escape(date(status.at))}` : ''}</span></li>`).join('');
+    const products = [...new Set(data.cves.map((item) => item.product).filter(Boolean))].sort();
+    products.forEach((product) => $('#product').add(new Option(product, product)));
+    selected = priority;
+    renderPriority();
+    renderRows();
+    if (page === 'home') renderOverview();
+  else if (page !== 'cve') renderFeed();
+  } catch (error) {
+    $('#freshness').textContent = '데이터를 불러오지 못했습니다. 새로고침해 주세요.';
+    console.error(error);
+    renderRows();
+  }
+}
+
+load();

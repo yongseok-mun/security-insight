@@ -12,29 +12,33 @@
 <aside class="sidebar">
   <div class="brand"><span data-icon="shield"></span><span>Security<br>Insight</span></div>
   <nav aria-label="보안 인텔리전스">
-    <button data-page="news"><span data-icon="news"></span>실시간 뉴스</button>
+    <button data-page="home" aria-current="page"><span data-icon="chart"></span>브리핑</button>
+    <button data-page="news"><span data-icon="news"></span>보안 뉴스</button>
     <button data-page="issues"><span data-icon="flame"></span>핵심 이슈</button>
     <button data-page="korea"><span data-icon="chart"></span>국내 동향</button>
-    <button data-page="cve" aria-current="page"><span data-icon="shield"></span>CVE</button>
-    <button data-page="dark"><span data-icon="user"></span>다크웹</button>
+    <button data-page="cve"><span data-icon="shield"></span>CVE</button>
+    <button data-page="dark"><span data-icon="user"></span>다크웹 보도</button>
   </nav>
 </aside>
 <main>
-  <section class="priority" aria-labelledby="priority-title">
+  <section class="priority" id="priority" aria-labelledby="priority-title" hidden>
     <h1 id="priority-title">오늘 먼저 확인할 항목</h1>
     <div class="priority-content">
-      <div class="hero-metrics"><div>CVSS<strong>9.8</strong></div><div>EPSS<strong>82%</strong></div></div>
-      <ul><li>외부 노출 게이트웨이 확인</li><li>KEV 등재 · 인증 우회</li><li>외부 노출 자산과 설치 버전 대조</li></ul>
+      <div class="priority-copy"><span id="priority-id"></span><h2 id="priority-name"></h2><p id="priority-reason"></p></div>
+      <div class="hero-metrics"><div>CVSS<strong id="hero-cvss"></strong></div><div>EPSS<strong id="hero-epss"></strong></div></div>
       <div class="actions"><button class="accent" id="top-check"><span data-icon="shield"></span>안전한 점검</button><button class="outline" id="top-source"><span data-icon="link"></span>출처 확인</button></div>
     </div>
   </section>
   <section id="workspace" aria-labelledby="page-title">
-    <header class="page-heading"><h2 id="page-title">CVE 우선순위</h2><span class="demo">시안 데이터</span><time datetime="2026-11-17">2026.11.17 KST</time></header>
-    <div id="cve-view">
+    <header class="page-heading">
+      <h2 id="page-title">보안 브리핑</h2><time id="freshness" aria-live="polite">수집 데이터 불러오는 중</time>
+    </header>
+    <section id="overview" class="overview" aria-label="오늘의 보안 동향"></section>
+    <div id="cve-view" hidden>
       <form id="filters" aria-label="CVE 검색 및 필터">
-        <label class="search"><span data-icon="search"></span><input id="query" type="search" aria-label="CVE 검색" placeholder="CVE 검색 (취약점 키워드, 제품명, 버전)"></label>
+        <label class="search"><span data-icon="search"></span><input id="query" type="search" aria-label="CVE 검색" placeholder="CVE ID, 제품 또는 키워드 검색"></label>
         <label class="kev-control"><input id="kev" type="checkbox">KEV 등재만 보기</label>
-        <select id="product" aria-label="제품"></select><select id="vendor" aria-label="벤더"></select><select id="version" aria-label="버전"></select>
+        <select id="product" aria-label="제품"><option value="">모든 제품</option></select>
       </form>
       <div class="workspace-grid">
         <section class="panel results" aria-label="CVE 목록">
@@ -49,6 +53,7 @@
     </div>
     <section class="panel feed" id="feed" hidden></section>
   </section>
+  <details class="source-status"><summary>데이터 수집 상태</summary><ul id="source-status-list"></ul><p>이 서비스는 NVD 데이터를 사용하며 NVD의 보증이나 인증을 받지 않았습니다.</p></details>
 </main>
 <dialog id="guide" aria-labelledby="guide-title">
   <form method="dialog" class="close"><button aria-label="닫기">×</button></form>

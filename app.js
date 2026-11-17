@@ -159,6 +159,8 @@ function renderRows() {
 
 function evidence(item) {
   const sources = [
+    ['CVE Program · CNA 원문', `https://www.cve.org/CVERecord?id=${encodeURIComponent(item.id)}`,
+      item.cna?.provider ? `등록 기관: ${item.cna.provider}` : 'CVE 레코드에서 제품·버전·해결책 확인'],
     ['cve.now', item.url, '피드에 게시된 제목·발행일·제품 정보'],
     ['NVD', `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(item.id)}`, item.nvd
       ? (item.nvdStatus || '레코드 수집') : '이번 수집 범위에서 레코드 미확인'],
@@ -168,8 +170,93 @@ function evidence(item) {
       item.kevDate ? `등재일 ${item.kevDate}` : `카탈로그 상태 ${kev(item)}`],
   ];
   return sources.filter(([name]) => name !== 'cve.now' || item.origin !== 'CISA KEV').map(([name, address, note]) => `<details><summary>${icon('doc')}${name}</summary><p>${escape(note)} · ${link(address, '출처 열기')}</p></details>`).join('')
-    + item.references.map((address) => `<p class="evidence-link">${link(address, 'NVD 수록 벤더 공지·패치')}</p>`).join('')
+    + [...new Set([...(item.cna?.references || []), ...item.references])].map((address) => `<p class="evidence-link">${link(address, '벤더 공지·패치')}</p>`).join('')
     + item.notices.map((notice) => `<p class="evidence-link">${link(notice.url, 'KISA · ' + notice.title)}</p>`).join('');
+}
+
+const versionStates = {affected:'영향받음', unaffected:'영향 없음', unknown:'영향 여부 미확인'};
+
+function versionLabel(entry) {
+  const lower = entry.version === '0' && (entry.lessThan || entry.lessThanOrEqual)
+    ? '최초 버전부터' : `${entry.version} 이상`;
+  const range = entry.lessThan ? `${lower} · ${entry.lessThan} 미만`
+    : entry.lessThanOrEqual ? `${lower} · ${entry.lessThanOrEqual} 이하` : entry.version;
+  const transitions = (entry.changes || []).map((change) =>
+    `${change.at}부터 ${versionStates[change.status] || '상태 확인 필요'}`);
+  return [`${versionStates[entry.status] || '미확인'}: ${range}`, ...transitions].join(' · ');
+}
+
+function attackConditions(item) {
+  if (!/^CVSS:(3\.[01]|4\.0)\//.test(item.vector || '')) return [];
+  const values = Object.fromEntries(item.vector.split('/').slice(1).map((part) => part.split(':')));
+  const mapping = [
+    ['AV', '접근 경로', {N:'네트워크', A:'인접 네트워크', L:'로컬', P:'물리 접근'}],
+    ['PR', '필요 권한', {N:'없음', L:'낮은 권한', H:'높은 권한'}],
+    ['UI', '사용자 상호작용', {N:'없음', R:'필요', P:'수동 상호작용', A:'능동 상호작용'}],
+    ['AT', '추가 공격 요구사항', {N:'없음', P:'있음'}],
+  ];
+  return mapping.flatMap(([key, name, options]) => options[values[key]] ? [`${name} · ${options[values[key]]}`] : []);
+}
+
+function bilingual(item) {
+  const english = item.descriptionEn || item.description;
+  const korean = item.descriptionKo;
+  const showMachine = english && !korean && 'Translator' in globalThis;
+  return `
+    <div class="bilingual">
+      <div><h4>한국어${korean && item.translationSource ? ` <small>${escape(item.translationSource)}</small>` : ''}</h4>
+      <p class="cve-summary" data-translation>${escape(korean || '등록된 한국어 설명이 없습니다.')}</p>
+      ${showMachine ? '<button class="utility" type="button" data-translate>한국어로 번역</button>' : ''}</div>
+      <div lang="en"><h4>English</h4><p class="cve-summary">${escape(english || 'No English description was collected.')}</p></div>
+    </div>`;
+}
+
+function technicalDetails(item) {
+  const cna = item.cna || {};
+  const conditions = attackConditions(item);
+  const listOf = (entries) => `<ul class="detail-list">${entries.map((value) => `<li>${escape(value)}</li>`).join('')}</ul>`;
+  return `
+    <h3>취약점 설명</h3>
+    ${bilingual(item)}
+    <h3>영향 범위</h3>
+    ${cna.affected?.length ? cna.affected.map((product) => `
+      <div class="affected-product">
+        <strong>${escape([product.vendor, product.product].filter(Boolean).join(' ') || item.product || '제품명 미확인')}</strong>
+        ${product.platforms.length ? `<div>플랫폼 · ${escape(product.platforms.join(', '))}</div>` : ''}
+        ${product.modules.length ? `<div>구성요소 · ${escape(product.modules.join(', '))}</div>` : ''}
+        ${product.versions.length ? listOf(product.versions.map(versionLabel)) : '<p>개별 버전 범위 미기재</p>'}
+        <small>목록 외 버전 · ${escape(versionStates[product.defaultStatus] || '미확인')}</small>
+      </div>`).join('') : `<p>${escape(item.product || '제품명 미확인')} · 구조화된 영향 버전 미확인. 원문 공지를 확인해 주세요.</p>`}
+    <h3>악용 조건</h3>
+    ${conditions.length ? `${listOf(conditions)}<small>CVSS 벡터 기준입니다. 기능 활성화, 배포 형태 등 추가 조건은 위 설명과 공지에서 확인하세요.</small>`
+      : '<p>구조화된 조건을 확인하지 못했습니다. 위 설명과 원문 공지에서 조건을 확인하세요.</p>'}
+    <h3>패치 버전</h3>
+    ${item.fixes.length ? `<p>${escape(item.fixes.join(', '))} <small>· cve.now 수정 버전 정보</small></p>` : ''}
+    ${item.describedFixes?.length ? `<p>${escape(item.describedFixes.join(', '))} <small>· 취약점 설명에 명시된 수정 버전</small></p>` : ''}
+    ${!item.fixes.length && !item.describedFixes?.length && !cna.solutions?.length ? '<p>패치 버전 미확인</p>' : ''}
+    ${cna.solutions?.length ? `<small>CNA 해결책 원문</small>${listOf(cna.solutions)}` : ''}
+    <h3>완화조치</h3>
+    ${cna.workarounds?.length ? `<small>CNA 임시 조치 원문</small>${listOf(cna.workarounds)}`
+      : '<p>수집한 CNA 레코드에서 임시 완화조치를 확인하지 못했습니다. 적용 전 벤더 공지의 우회책을 확인하세요.</p>'}
+    ${item.requiredAction ? `<small>CISA KEV 권고 원문</small>${listOf([item.requiredAction])}` : ''}`;
+}
+
+async function translateDescription(button, item) {
+  const answer = button.parentElement.querySelector('[data-translation]');
+  button.disabled = true;
+  answer.textContent = '브라우저에서 번역을 준비하고 있습니다.';
+  let translator;
+  try {
+    translator = await Translator.create({sourceLanguage:'en', targetLanguage:'ko'});
+    const translated = await translator.translate(item.descriptionEn || item.description);
+    answer.textContent = translated;
+    button.textContent = '기계 번역 · 원문 대조 필요';
+  } catch {
+    answer.textContent = '이 브라우저에서 번역을 불러오지 못했습니다. 아래 영문을 확인하세요.';
+    button.disabled = false;
+  } finally {
+    translator?.destroy();
+  }
 }
 
 function renderInspector(panel = $('#inspector'), item = selected) {
@@ -184,15 +271,7 @@ function renderInspector(panel = $('#inspector'), item = selected) {
       <div>CVSS ${item.cvssVersion ? `v${escape(item.cvssVersion)}` : ''}<strong>${cvss(item)}</strong></div>
       <div>EPSS<strong>${epss(item)}</strong></div><div>KEV<strong>${kev(item)}</strong></div>
     </div>
-    <h3>영향 범위</h3>
-    <dl class="facts">
-      <dt>제품</dt><dd>${escape(item.product || '수집 정보 없음')}</dd>
-      <dt>수정 버전 정보</dt><dd>${escape(item.fixes.join(', ') || '벤더 공지 확인 필요')}</dd>
-      <dt>CVSS 제공처</dt><dd>${escape(item.cvssSource || '미확인')}</dd>
-      <dt>공개 시각</dt><dd>${escape(date(item.published))}</dd>
-    </dl>
-    <h3>취약점 설명</h3>
-    <p class="cve-summary">${escape(item.description || '수집된 NVD 설명이 없습니다.')}</p>
+    <div class="technical-details">${technicalDetails(item)}</div>
     <h3>출처 확인</h3>
     <div class="source-list">${evidence(item)}</div>
     <div class="actions">
@@ -330,12 +409,13 @@ function renderFeed() {
 
 function showGuide(item, mode) {
   if (!item) return;
+  guideItem = item;
   const analysis = mode === 'analysis';
   $('#guide-content').innerHTML = `
     <span class="eyebrow">${escape(item.id)}</span>
     <h2 id="guide-title">${analysis ? 'CVE 상세' : '안전한 점검'}</h2>
     <p>${escape(item.title)}</p>
-    ${analysis ? `<h3>NVD 설명</h3><p>${escape(item.description || '이번 수집에서 확보한 NVD 설명이 없습니다.')}</p>
+    ${analysis ? `<div class="technical-details">${technicalDetails(item)}</div>
       ${item.vector ? `<code>${escape(item.vector)}</code>` : ''}` : ''}
     <h3>읽기 전용 점검 순서</h3>
     <ol>
@@ -366,9 +446,18 @@ document.querySelectorAll('[data-view]').forEach((button) => button.addEventList
   renderRows();
 }));
 document.querySelectorAll('[data-page]').forEach((button) => button.addEventListener('click', () => showPage(button.dataset.page)));
-$('#inspector').addEventListener('click', (event) => {
+function detailsAction(event, item) {
+  if (!item) return;
   const button = event.target.closest('[data-guide]');
-  if (button) showGuide(selected, button.dataset.guide);
+  const translate = event.target.closest('[data-translate]');
+  if (button) showGuide(item, button.dataset.guide);
+  if (translate) translateDescription(translate, item);
+}
+let guideItem;
+$('#inspector').addEventListener('click', (event) => detailsAction(event, selected));
+$('#guide').addEventListener('click', (event) => {
+  const button = event.target.closest('[data-translate]');
+  if (button) translateDescription(button, guideItem);
 });
 function openCve(id) {
   $('#filters').reset();
@@ -393,8 +482,7 @@ $('#priority-list').addEventListener('click', (event) => {
   [...document.querySelectorAll('.priority-row')].find((button) => button.dataset.cve === id)?.focus();
 });
 $('#priority-inspector').addEventListener('click', (event) => {
-  const button = event.target.closest('[data-guide]');
-  if (button) showGuide(priorities.find((item) => item.id === prioritySelection), button.dataset.guide);
+  detailsAction(event, priorities.find((item) => item.id === prioritySelection));
 });
 
 function buildMail() {

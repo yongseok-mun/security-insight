@@ -4,6 +4,7 @@ import concurrent.futures
 import datetime as dt
 import email.utils
 import html
+import hashlib
 from html.parser import HTMLParser
 import json
 import os
@@ -229,6 +230,90 @@ def epss(ids):
             for row in payload['data']}
 
 
+CVE_LIST = 'https://raw.githubusercontent.com/CVEProject/cvelistV5/main/cves'
+
+
+def cna_record(cve_id):
+    _, year, number = cve_id.split('-')
+    path = f'{year}/{int(number) // 1000 if len(number) > 4 else number[0]}xxx/{cve_id}.json'
+    try:
+        payload = json.loads(get(f'{CVE_LIST}/{path}'))
+        if payload['cveMetadata']['cveId'] == cve_id and payload['cveMetadata']['state'] == 'PUBLISHED':
+            return payload['containers']['cna']
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        print(f'{cve_id} CNA: {error}', file=sys.stderr)
+    return None
+
+
+def localized(container, field, lang):
+    return list(dict.fromkeys(clean(entry['value']) for entry in container.get(field, [])
+                             if entry.get('lang', '').split('-')[0] == lang and entry.get('value')))
+
+
+def cna_details(container):
+    affected = []
+    for product in container.get('affected', []):
+        versions = []
+        for entry in product.get('versions', []):
+            versions.append({key: entry[key] for key in
+                             ('version', 'lessThan', 'lessThanOrEqual', 'status', 'changes')
+                             if key in entry})
+        affected.append(dict(
+            vendor=clean(product.get('vendor')), product=clean(product.get('product') or product.get('packageName')),
+            platforms=product.get('platforms', []), modules=product.get('modules', []),
+            defaultStatus=product.get('defaultStatus', 'unknown'), versions=versions,
+        ))
+    return dict(
+        provider=container.get('providerMetadata', {}).get('shortName'),
+        affected=affected,
+        solutions=localized(container, 'solutions', 'ko') or localized(container, 'solutions', 'en'),
+        workarounds=localized(container, 'workarounds', 'ko') or localized(container, 'workarounds', 'en'),
+        references=list(dict.fromkeys(address for entry in container.get('references', [])
+                                      if 'vendor-advisory' in [tag.lower() for tag in entry.get('tags', [])]
+                                      and (address := safe_url(entry.get('url')))))[:5],
+    )
+
+
+def enrich_cves(records, previous, translations):
+    old_rows = {entry['id']: entry for entry in previous.get('cves', [])}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+        def enrich(item):
+            old = old_rows.get(item['id'], {})
+            cna = None
+            # Keep unchanged records warm for six hours, then recheck editorial revisions.
+            last_checked = old.get('cnaChecked')
+            if last_checked and NOW - dt.datetime.fromisoformat(last_checked) < dt.timedelta(hours=6):
+                item.update({key: old[key] for key in ('cna', 'cnaChecked', 'cnaEnglish', 'cnaKorean') if key in old})
+            else:
+                cna = cna_record(item['id'])
+                if cna:
+                    item['cna'] = cna_details(cna)
+                    item['cnaChecked'] = NOW.isoformat()
+                    item['cnaEnglish'] = next(iter(localized(cna, 'descriptions', 'en')), None)
+                    item['cnaKorean'] = next(iter(localized(cna, 'descriptions', 'ko')), None)
+                elif old.get('cna'):
+                    item.update({key: old[key] for key in ('cna', 'cnaChecked', 'cnaEnglish', 'cnaKorean') if key in old})
+            english = item.get('descriptionEn') or item.get('cnaEnglish')
+            korean = item.get('descriptionKo') or item.get('cnaKorean')
+            if korean:
+                item['translationSource'] = '공식 레코드'
+            elif english:
+                documented = translations.get(item['id'], {})
+                digest = hashlib.sha256(english.encode('utf-8')).hexdigest()
+                if documented.get('sha256') == digest:
+                    korean = documented['summary']
+                    item['translationSource'] = '한국어 요약'
+            explicit_fixes = re.findall(
+                r'\b(?:fixed|patched|resolved) in version v?([0-9][0-9A-Za-z.+-]*[0-9A-Za-z])\b',
+                english or '', flags=re.IGNORECASE)
+            item['describedFixes'] = list(dict.fromkeys(explicit_fixes))
+            item['descriptionEn'] = english
+            item['descriptionKo'] = korean
+            item['description'] = english or korean
+            return item
+        return list(pool.map(enrich, records))
+
+
 def normalize(item, record, kev, probability, news):
     cve_id = item['id']
     score, version, vector, provider = metric(record)
@@ -248,7 +333,8 @@ def normalize(item, record, kev, probability, news):
                 cvssVersion=version, vector=vector,
                 epss=probability.get(cve_id), kev=cve_id in kev if kev else (True if item.get('kev') else None),
                 kevDate=kev_item.get('dateAdded') if kev_item else None,
-                description=descriptions.get('ko') or descriptions.get('en'),
+                descriptionEn=descriptions.get('en'), descriptionKo=descriptions.get('ko'),
+                requiredAction=clean(kev_item.get('requiredAction')) if kev_item else None,
                 fixes=[clean(value) for value in item.get('fix', []) if isinstance(value, str)][:10],
                 references=list(dict.fromkeys(references))[:5], notices=notices[:3])
 
@@ -306,6 +392,9 @@ def collect():
             statuses['cve.now'] = dict(previous['sources'].get('cve.now', {}), state='stale')
     if not records:
         raise SystemExit('No valid CVE snapshot available')
+    translation_file = ROOT / 'cve-ko.json'
+    translations = json.loads(translation_file.read_text(encoding='utf-8')) if translation_file.exists() else {}
+    records = enrich_cves(records, previous, translations)
     snapshot = dict(updatedAt=NOW.isoformat(), cves=records, news=news, feeds=feeds, sources=dict(sorted(statuses.items())))
     temp = path.with_suffix('.tmp')
     temp.write_text(json.dumps(snapshot, ensure_ascii=False, separators=(',', ':')) + '\n', encoding='utf-8')

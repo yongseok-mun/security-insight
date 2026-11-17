@@ -294,7 +294,7 @@ def enrich_cves(records, previous, translations):
                 elif old.get('cna'):
                     item.update({key: old[key] for key in ('cna', 'cnaChecked', 'cnaEnglish', 'cnaKorean') if key in old})
             english = item.get('descriptionEn') or item.get('cnaEnglish')
-            korean = item.get('descriptionKo') or item.get('cnaKorean')
+            korean = (item.get('descriptionKo') if item.get('translationSource') != '한국어 요약' else None) or item.get('cnaKorean')
             if korean:
                 item['translationSource'] = '공식 레코드'
             elif english:

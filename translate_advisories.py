@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import re
 import sys
+import time
 
 from collect import clean
 
@@ -44,20 +45,29 @@ def translate(sources):
     import torch
     from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
+    deadline = time.monotonic() + 150
+    torch.set_num_threads(2)
     tokenizer = AutoTokenizer.from_pretrained(MODEL, revision=REVISION)
     model = AutoModelForSeq2SeqLM.from_pretrained(MODEL, revision=REVISION, use_safetensors=True).eval()
-    torch.set_num_threads(2)
     for index in range(0, len(sources), 8):
+        if time.monotonic() >= deadline:
+            break
         batch = sources[index:index + 8]
         # Skip overlong sources rather than publish an incomplete translation.
-        batch = [text for text in batch if len(tokenizer.encode(text)) <= 448]
+        valid = []
+        for text in batch:
+            if len(tokenizer.encode(text)) <= 448:
+                valid.append(text)
+            else:
+                yield text, None
+        batch = valid
         if not batch:
             continue
         with torch.inference_mode():
             tokens = tokenizer(batch, return_tensors='pt', padding=True)
-            outputs = model.generate(**tokens, max_new_tokens=448, num_beams=1)
+            outputs = model.generate(**tokens, max_new_tokens=448, max_time=max(1, deadline - time.monotonic()), num_beams=1)
         for source, output in zip(batch, outputs):
-            if len(output) < 448:
+            if len(output) < 448 and output[-1].item() in (tokenizer.eos_token_id, tokenizer.pad_token_id):
                 yield source, clean(tokenizer.decode(output, skip_special_tokens=True))
 
 

@@ -22,6 +22,9 @@ NOW = dt.datetime.now(dt.timezone.utc)
 HISTORY_DAYS = 7
 MAX_CVES = 140
 NVD_EXTRA = 30
+ARCHIVE_LIMIT = 1800
+ARCHIVE_DAYS = 30
+VERSION_TOKEN = r'[0-9]+(?:\.[0-9]+)+(?:[A-Za-z0-9+~_-]+(?:\.[A-Za-z0-9+~_-]+)*)?'
 CVE = re.compile(r'\bCVE-\d{4}-\d{4,}\b', re.I)
 DARK = re.compile(r'다크웹|랜섬웨어|탈취.*판매|dark.?web|ransomware|leak site', re.I)
 SECURITY = re.compile(r'보안|해킹|침해|취약점|랜섬웨어|정보.?유출|악성코드|사이버|security|CVE-', re.I)
@@ -204,10 +207,11 @@ def recent_kev(catalog):
                  origin='CISA KEV') for item in entries]
 
 
-def nvd_recent():
-    start = (NOW - dt.timedelta(days=3)).strftime('%Y-%m-%dT%H:%M:%S.000')
+def nvd_recent(modified=False):
+    start = (NOW - (dt.timedelta(hours=24) if modified else dt.timedelta(days=3))).strftime('%Y-%m-%dT%H:%M:%S.000')
     end = NOW.strftime('%Y-%m-%dT%H:%M:%S.000')
-    params = url.urlencode(dict(pubStartDate=start, pubEndDate=end, resultsPerPage=2000))
+    prefix = 'lastMod' if modified else 'pub'
+    params = url.urlencode({prefix + 'StartDate':start, prefix + 'EndDate':end, 'resultsPerPage':2000})
     payload = json.loads(get(NVD + '?' + params))
     return {row['cve']['id']: row['cve'] for row in payload['vulnerabilities']}
 
@@ -274,6 +278,7 @@ def cna_details(container):
         affected.append(dict(
             vendor=clean(product.get('vendor')), product=clean(product.get('product') or product.get('packageName')),
             platforms=product.get('platforms', []), modules=product.get('modules', []),
+            programFiles=product.get('programFiles', []),
             defaultStatus=product.get('defaultStatus', 'unknown'), versions=versions,
         ))
     return dict(
@@ -402,32 +407,37 @@ def fetch_debian_packages():
     return debian_packages(json.loads(payload))
 
 
-def candidates(feed, nvd, kev, previous):
+def candidates(feed, nvd, kev, previous, modified=None):
     previous_at = previous.get('updatedAt')
     cutoff = NOW - dt.timedelta(days=HISTORY_DAYS)
+    feed_by_id = {item['id']: item for item in feed}
     items = {}
-    for item in feed:
-        items[item['id']] = {**item, 'lastDiscoveredAt': NOW.isoformat()}
-    for item in recent_kev(kev):
-        items.setdefault(item['id'], {**item, 'lastDiscoveredAt': NOW.isoformat()})
+    kev_items = recent_kev(kev)
+    for item in kev_items:
+        current_feed = feed_by_id.get(item['id'])
+        items[item['id']] = {**item, **current_feed, 'origin':'cve.now', 'lastDiscoveredAt':NOW.isoformat()} if current_feed else {
+            **item, 'lastDiscoveredAt':NOW.isoformat()}
     published = sorted(nvd.values(), key=lambda item: item.get('published') or '', reverse=True)
-    extra = 0
-    for item in published:
-        if item['id'] in items or item.get('vulnStatus', '').lower() == 'rejected':
-            continue
-        # NVD also seeds independently discoverable entries if the other feed is late.
-        items[item['id']] = dict(id=item['id'], origin='NVD', publishedAt=item.get('published'),
-                                 lastDiscoveredAt=NOW.isoformat())
-        extra += 1
-        if extra >= NVD_EXTRA:
-            break
+    recent_changes = sorted((modified or {}).values(), key=lambda item: item.get('lastModified') or '', reverse=True)
+    for source, quota in ((published, NVD_EXTRA), (recent_changes, NVD_EXTRA // 2)):
+        extra = 0
+        for item in source:
+            if item['id'] in items or item['id'] in feed_by_id or item.get('vulnStatus', '').lower() == 'rejected':
+                continue
+            items[item['id']] = dict(id=item['id'], origin='NVD', publishedAt=item.get('published'),
+                                     lastDiscoveredAt=NOW.isoformat())
+            extra += 1
+            if extra >= quota:
+                break
+    for item in feed:
+        items.setdefault(item['id'], {**item, 'lastDiscoveredAt': NOW.isoformat()})
     for old in previous.get('cves', []):
         retained_at = old.get('lastDiscoveredAt') or previous_at
         if retained_at and moment(retained_at) >= cutoff:
             items.setdefault(old['id'], dict(id=old['id'], origin=old.get('origin', 'cve.now'),
                                             lastDiscoveredAt=retained_at))
     return [item for item in items.values()
-            if nvd.get(item['id'], {}).get('vulnStatus', '').lower() != 'rejected'][:MAX_CVES]
+            if ((modified or {}).get(item['id']) or nvd.get(item['id'], {})).get('vulnStatus', '').lower() != 'rejected'][:max(MAX_CVES, len(kev_items))]
 
 
 def merge_record(item, old, nvd, kev, probability, news, statuses):
@@ -473,6 +483,115 @@ def merge_record(item, old, nvd, kev, probability, news, statuses):
     return current
 
 
+def impact_values(item):
+    cna = item.get('cna') or {}
+    impact = []
+    statuses = {'affected':'영향받음', 'unaffected':'영향 없음', 'unknown':'미확인'}
+    for product in cna.get('affected', []):
+        identity = ' / '.join(filter(None, [product.get('vendor'), product.get('product')])) or '제품 미확인'
+        for key, label in [('platforms','플랫폼'), ('modules','구성요소'), ('programFiles','프로그램 파일')]:
+            if product.get(key):
+                impact.append(f"{identity} · {label}: {', '.join(sorted(set(product[key])))}")
+        default = product.get('defaultStatus', 'unknown')
+        impact.append(f'{identity} · 목록 외 버전: {statuses.get(default, default)}')
+        for entry in product.get('versions', []):
+            status = entry.get('status', 'unknown')
+            lower, exclusive, inclusive = [entry.get(key) for key in ('version','lessThan','lessThanOrEqual')]
+            bounds = ' / '.join(filter(None, [
+                ('최초 버전부터' if lower == '0' else f'{lower} 이상') if (exclusive or inclusive) else lower,
+                f'{exclusive} 미만' if exclusive else '', f'{inclusive} 이하' if inclusive else '',
+            ]))
+            changes = sorted(f"{change.get('at')} → {statuses.get(change.get('status'), '미확인')}" for change in entry.get('changes', []))
+            impact.append(' · '.join(filter(None, [identity, statuses.get(status, status), bounds, entry.get('versionType'), *changes])))
+
+    def nvd_conditions(node, parent=()):
+        logic = (*parent, str(node.get('operator') or 'OR') + (' (부정)' if node.get('negate') else ''))
+        for entry in node.get('cpeMatch', []):
+            bounds = [f'{entry[key]} {label}' for key, label in (
+                ('versionStartIncluding','이상'), ('versionStartExcluding','초과'),
+                ('versionEndIncluding','이하'), ('versionEndExcluding','미만')) if entry.get(key)]
+            yield ' · '.join(['NVD', ' / '.join(logic), '취약 대상' if entry.get('vulnerable') else '환경 조건',
+                              entry.get('criteria', ''), *bounds])
+        for child in node.get('nodes', []) or node.get('children', []):
+            yield from nvd_conditions(child, logic)
+
+    for configuration in item.get('nvdConfigurations') or []:
+        impact.extend(nvd_conditions(configuration))
+    vector = item.get('vector') or ''
+    if vector.startswith(('CVSS:3.', 'CVSS:4.')):
+        conditions = sorted(metric for metric in vector.split('/') if metric.split(':')[0] in ('AV','AC','AT','PR','UI'))
+        if conditions:
+            impact.append('CVSS 전제조건 · ' + ' / '.join(conditions))
+    return sorted(set(impact))
+
+
+def patch_evidence(item):
+    cve_id = item['id']
+    cna = f'https://www.cve.org/CVERecord?id={cve_id}'
+    nvd = f'https://nvd.nist.gov/vuln/detail/{cve_id}'
+    evidence = []
+    for value in item.get('fixes', []):
+        if re.fullmatch(VERSION_TOKEN, value):
+            evidence.append(dict(version=value, source='cve.now 수정 정보', url=item.get('url'), text=value))
+    pattern = re.compile(rf'\b(?:fixed|patched|resolved)\s+in\s+(?:version\s+)?v?({VERSION_TOKEN})\b', re.I)
+    english = item.get('descriptionEn') or ''
+    source = item.get('descriptionEnSource')
+    if source in ('NVD', 'CNA'):
+        for match in pattern.finditer(english):
+            evidence.append(dict(version=match[1], source=f'{source} 설명 명시',
+                                 url=nvd if source == 'NVD' else cna, text=english[:2400]))
+    solution_pattern = re.compile(rf'\b(?:upgrade|update)\s+to\s+(?:(?!(?:CVE|CWE)-)[A-Za-z][\w+./-]*\s+){{0,4}}v?({VERSION_TOKEN})\b', re.I)
+    for text in (item.get('cna') or {}).get('solutions', []):
+        for match in [*pattern.finditer(text), *solution_pattern.finditer(text)]:
+            evidence.append(dict(version=match[1], source='CNA 해결책 명시', url=cna, text=text[:2400]))
+    seen = set()
+    unique = []
+    for entry in evidence:
+        key = (entry['version'], entry['source'], entry['url'])
+        if key not in seen:
+            seen.add(key)
+            unique.append(entry)
+    return unique
+
+
+def annotate_review_fields(item):
+    item['impactScope'] = impact_values(item)
+    item['patchEvidence'] = patch_evidence(item)
+
+
+def build_archive(previous, prior_active, nvd, feed, active, kev, debian, news):
+    cutoff = NOW - dt.timedelta(days=ARCHIVE_DAYS)
+    archive = {**previous, **prior_active}
+    active_ids = {item['id'] for item in active}
+    sources = {item['id']: item for item in feed}
+    for cve_id in set(nvd) | set(sources):
+        record = nvd.get(cve_id, {})
+        if record.get('vulnStatus', '').lower() == 'rejected':
+            archive.pop(cve_id, None)
+            continue
+        if cve_id in active_ids:
+            continue
+        item = normalize(sources.get(cve_id, {'id':cve_id, 'origin':'NVD'}), record, kev, {}, news)
+        item['description'] = item.get('descriptionEn') or item.get('descriptionKo')
+        item['archivedAt'] = NOW.isoformat()
+        if debian.get(cve_id):
+            item['debianPackages'] = debian[cve_id]
+        # Keep CNA enrichment for items observed previously in the active list.
+        old = archive.get(cve_id) or {}
+        for key in ('cna', 'cnaChecked', 'titleKo', 'translationSource'):
+            if key in old:
+                item[key] = old[key]
+        annotate_review_fields(item)
+        archive[cve_id] = item
+    retained = []
+    for key, item in archive.items():
+        seen = moment(item.get('archivedAt') or item.get('lastDiscoveredAt'))
+        if key not in active_ids and seen and seen >= cutoff:
+            retained.append((key, {**item, 'archivedAt':seen.isoformat()}))
+    retained.sort(key=lambda pair: pair[1]['archivedAt'], reverse=True)
+    return dict(retained[:ARCHIVE_LIMIT])
+
+
 def remediation_values(item):
     cna = item.get('cna') or {}
     return {
@@ -480,6 +599,9 @@ def remediation_values(item):
         '해결책': sorted(set(cna.get('solutions', []))),
         '완화책': sorted(set(cna.get('workarounds', []))),
         'CISA 조치 권고': [item['requiredAction']] if item.get('requiredAction') else [],
+        '영향 버전·조건': item.get('impactScope') if 'impactScope' in item else impact_values(item),
+        'Debian 수정 패키지': sorted(
+            f"{entry['suite']} / {entry['package']} · {entry['fixed']}" for entry in item.get('debianPackages', [])),
     }
 
 
@@ -527,6 +649,11 @@ def collect():
         previous_debian = json.loads(debian_cache.read_text(encoding='utf-8'))
     except (OSError, ValueError):
         previous_debian = {}
+    archive_cache = ROOT / '.feed-cache' / 'cve-archive.json'
+    try:
+        previous_archive = json.loads(archive_cache.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        previous_archive = {}
 
     def attempt(name, job, fallback):
         try:
@@ -545,13 +672,16 @@ def collect():
                      for name, (address, kind) in FEEDS.items()}
         now_job = pool.submit(attempt, 'cve.now', cve_now, [])
         nvd_job = pool.submit(attempt, 'NVD', nvd_recent, {})
+        nvd_changes_job = pool.submit(attempt, 'NVD · 최근 수정', lambda: nvd_recent(modified=True), {})
         kev_job = pool.submit(attempt, 'CISA KEV', lambda: {
             row['cveID']: row for row in json.loads(get(KEV))['vulnerabilities']
         }, {})
         feed = now_job.result()
         kev = kev_job.result()
         nvd = nvd_job.result()
-        items = candidates(feed, nvd, kev, previous)
+        modified = nvd_changes_job.result()
+        items = candidates(feed, nvd, kev, previous, modified)
+        nvd.update(modified)
         old_rows = {entry['id']: entry for entry in previous.get('cves', [])}
         debian_job = pool.submit(attempt, 'Debian Security Tracker', fetch_debian_packages, previous_debian)
         if statuses['cve.now']['state'] == 'unavailable' and any(row.get('origin') == 'cve.now' for row in old_rows.values()):
@@ -559,7 +689,7 @@ def collect():
             statuses['cve.now'] = dict(state='stale', at=prior.get('at'), count=prior.get('count', 0))
         probability_job = pool.submit(attempt, 'FIRST EPSS', lambda: epss([row['id'] for row in items]), {})
         feeds = {name: job.result() for name, job in feed_jobs.items()}
-        missing = [item['id'] for item in items if item.get('origin') == 'CISA KEV' and item['id'] not in nvd]
+        missing = [item['id'] for item in items if item['id'] in kev and item['id'] not in nvd]
         supplement = attempt('NVD · KEV 보강', lambda: nvd_selected(missing), {}) if missing else {}
         nvd.update(supplement)
         probability = probability_job.result()
@@ -584,6 +714,8 @@ def collect():
     translation_file = ROOT / 'cve-ko.json'
     translations = json.loads(translation_file.read_text(encoding='utf-8')) if translation_file.exists() else {}
     records = enrich_cves(records, previous, translations)
+    for item in records:
+        annotate_review_fields(item)
     snapshot = dict(updatedAt=NOW.isoformat(), cves=records, news=news, feeds=feeds,
                     history=build_history(records, previous), sources=dict(sorted(statuses.items())))
     temp = path.with_suffix('.tmp')
@@ -593,6 +725,11 @@ def collect():
     lookup_temp = lookup.with_suffix('.tmp')
     lookup_temp.write_text(json.dumps(debian, ensure_ascii=False, separators=(',', ':')) + '\n', encoding='utf-8')
     lookup_temp.replace(lookup)
+    archive = build_archive(previous_archive, old_rows, nvd, feed, records, kev, debian, news)
+    write_archive = ROOT / 'cve-archive.json'
+    write_archive_temp = write_archive.with_suffix('.tmp')
+    write_archive_temp.write_text(json.dumps(archive, ensure_ascii=False, separators=(',', ':')) + '\n', encoding='utf-8')
+    write_archive_temp.replace(write_archive)
     print(f'{len(records)} CVEs, {len(news)} linked news items, {sum(bool(article.get("image")) for article in news)} with publisher images')
 
 

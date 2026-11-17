@@ -58,6 +58,8 @@ const cveUrl = (id) => {
 };
 let data = {cves:[], news:[], sources:{}};
 let selected;
+let archiveMatch;
+let archivePromise;
 let priorities = [];
 let newsMode = 'recent';
 let mailDraft;
@@ -116,7 +118,7 @@ const matchesProduct = (item, product) => {
 const watched = (item) => preferences.products.some((product) => matchesProduct(item, product));
 
 // Keep the existing snapshot order for completion records saved by earlier releases.
-const remediationFields = ['패치 버전', '해결책', '완화책', 'CISA 조치 권고'];
+const remediationFields = ['패치 버전', '해결책', '완화책', 'CISA 조치 권고', '영향 버전·조건', 'Debian 수정 패키지'];
 
 function remediationValues(item) {
   return [
@@ -124,6 +126,8 @@ function remediationValues(item) {
     [...new Set(item.cna?.solutions || [])].sort(),
     [...new Set(item.cna?.workarounds || [])].sort(),
     item.requiredAction || '',
+    item.impactScope || [],
+    (item.debianPackages || []).map(({suite, package:pkg, fixed}) => `${suite} / ${pkg} · ${fixed}`).sort(),
   ];
 }
 
@@ -139,19 +143,23 @@ function reviewState(item) {
   const review = preferences.reviews[item.id];
   if (review?.state === 'investigate') return 'investigate';
   if (review?.state !== 'done') return 'unreviewed';
-  return review.fingerprint !== remediationFingerprint(item) || remediationSinceReview(item, review).length
-    ? 'recheck' : 'done';
+  return remediationHasChanges(item, review) ? 'recheck' : 'done';
 }
 
 function completedRemediation(review) {
   try {
     const snapshot = JSON.parse(review.fingerprint);
-    if (Array.isArray(snapshot) && snapshot.length === remediationFields.length
-      && snapshot.slice(0, 3).every((values) => Array.isArray(values)
-        && values.every((value) => typeof value === 'string'))
-      && typeof snapshot[3] === 'string') return snapshot;
+    if (Array.isArray(snapshot) && [4, remediationFields.length].includes(snapshot.length)
+      && snapshot.every((values, index) => index === 3 ? typeof values === 'string'
+        : Array.isArray(values) && values.every((value) => typeof value === 'string'))) return snapshot;
   } catch { /* Some stored reviews may be missing a readable snapshot. */ }
   return null;
+}
+
+function remediationHasChanges(item, review) {
+  const saved = completedRemediation(review);
+  return !saved || JSON.stringify(saved) !== JSON.stringify(remediationValues(item).slice(0, saved.length))
+    || remediationSinceReview(item, review).length > 0;
 }
 
 function reviewBadge(item) {
@@ -161,6 +169,8 @@ function reviewBadge(item) {
 
 function rowsForFilters() {
   const terms = $('#query').value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (terms.length === 1 && archiveMatch?.id.toLowerCase() === terms[0]
+    && !data.cves.some((item) => item.id === archiveMatch.id)) return [archiveMatch];
   const product = $('#product').value;
   const rows = data.cves.filter((item) => {
     const text = [item.id, item.title, item.product, ...item.fixes, item.description].join(' ').toLowerCase();
@@ -602,6 +612,18 @@ const cnaRecordUrl = (item) => `https://www.cve.org/CVERecord?id=${encodeURIComp
 const nvdRecordUrl = (item) => `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(item.id)}`;
 const advisoryReferences = (item) => [...new Set([...(item.cna?.references || []), ...(item.references || [])]
   .map(publicUrl).filter(Boolean))];
+const patchVersionPattern = /\b\d+(?:\.\d+)+(?:[A-Za-z0-9+~_-]+(?:\.[A-Za-z0-9+~_-]+)*)?/g;
+
+function patchRecords(item) {
+  if (Array.isArray(item.patchEvidence)) return item.patchEvidence;
+  return [
+    ...(item.fixes || []).map((version) => ({version, source:'cve.now 수정 정보', url:item.url, text:version})),
+    ...(item.describedFixes || []).map((version) => ({version, source:'수집 설명 추출',
+      url:item.descriptionEnSource === 'NVD' ? nvdRecordUrl(item) : cnaRecordUrl(item), text:item.descriptionEn})),
+  ].filter(({version}) => version.match(patchVersionPattern)?.[0] === version);
+}
+
+const knownPatchVersions = (item) => [...new Set(patchRecords(item).map(({version}) => version))];
 
 function csvCell(value) {
   const text = String(value ?? '');
@@ -649,7 +671,7 @@ function showInstalledVersionResult(event, item) {
     product.modules?.length ? `구성요소 · ${product.modules.join(', ')}` : '',
     ...attackConditions(item),
   ].filter(Boolean);
-  const fixes = [...new Set([...(item.fixes || []), ...(item.describedFixes || [])])];
+  const fixes = knownPatchVersions(item);
   const fixNote = fixes.join(', ') || '확인된 수정 버전 없음 · 원문 공지 참조';
   if (batch) {
     const counts = Object.entries(batchLabels).map(([status, label]) =>
@@ -761,7 +783,7 @@ function actionSummary(item) {
   const affected = item.cna?.affected || [];
   const ranges = affectedRanges(item);
   const conditions = attackConditions(item);
-  const fixes = [...new Set([...item.fixes, ...(item.describedFixes || [])])];
+  const fixes = knownPatchVersions(item);
   const platforms = [...new Set(affected.flatMap((product) => product.platforms || []))];
   const modules = [...new Set(affected.flatMap((product) => product.modules || []))];
   const firstCheck = [
@@ -799,10 +821,12 @@ function remediationComparison(item, review) {
   const events = remediationSinceReview(item, review)
     .sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
   const rows = completed ? remediationFields.flatMap((field, index) => {
-    if (JSON.stringify(completed[index]) === JSON.stringify(current[index])) return [];
     const latest = events.find((event) => event.changes?.some((change) => change.field === field));
+    const earliest = events.findLast((event) => event.changes?.some((change) => change.field === field));
+    const earlier = completed[index] ?? earliest?.changes.find((change) => change.field === field)?.before;
+    if (earlier === undefined || JSON.stringify(earlier) === JSON.stringify(current[index])) return [];
     const values = (value) => (Array.isArray(value) ? value : [value]).filter(Boolean);
-    return [{field, before:values(completed[index]), after:values(current[index]), at:latest?.at}];
+    return [{field, before:values(earlier), after:values(current[index]), at:latest?.at}];
   }) : [];
   return {completed, events, rows};
 }
@@ -828,6 +852,8 @@ function reviewComparison(item, state) {
     rows.some(({field}) => field === remediationFields[0]) && item.origin !== 'CISA KEV' ? link(item.url, 'cve.now') : '',
     rows.some(({field}) => field === remediationFields[3]) ? link(
       `https://www.cisa.gov/known-exploited-vulnerabilities-catalog?search_api_fulltext=${encodeURIComponent(item.id)}`, 'CISA KEV') : '',
+    rows.some(({field}) => field === remediationFields[4]) ? link(nvdRecordUrl(item), 'NVD 범위 원문') : '',
+    rows.some(({field}) => field === remediationFields[5]) ? link(debianRecordUrl(item), 'Debian 수정 패키지 원문') : '',
   ].filter(Boolean);
   let content = rows.length ? rows.map(({field, before, after, at}) => `
     <div class="review-difference">
@@ -1018,8 +1044,7 @@ function myWorkRows(items, reviews, drafts, today) {
     if (!draft && state !== 'investigate' && state !== 'recheck') return [];
     const due = draft?.metadata?.dueDate || '';
     const days = /^\d{4}-\d{2}-\d{2}$/.test(due) ? (Date.parse(due) - Date.parse(today)) / 86400000 : Infinity;
-    const changed = Boolean(item && draft?.baseline && (
-      draft.baseline.fingerprint !== remediationFingerprint(item) || remediationSinceReview(item, draft.baseline).length));
+    const changed = Boolean(item && draft?.baseline && remediationHasChanges(item, draft.baseline));
     const urgency = days <= 0 ? 0 : changed || state === 'recheck' ? 1 : days <= 3 ? 2 : 3;
     return [{id, item, draft, due, days, state, changed, urgency}];
   }).sort((a,b) => a.urgency - b.urgency || (a.days - b.days || 0)
@@ -1163,14 +1188,20 @@ function showGuide(item, mode) {
 }
 
 function selectItem(id) {
-  selected = data.cves.find((item) => item.id === id);
+  selected = data.cves.find((item) => item.id === id) || (archiveMatch?.id === id ? archiveMatch : null);
   renderRows();
 }
 
-$('#filters').addEventListener('submit', (event) => event.preventDefault());
+$('#filters').addEventListener('submit', (event) => {
+  event.preventDefault();
+  searchArchivedCve($('#query').value.trim().toUpperCase());
+});
 $('#filters').addEventListener('input', () => {
   $('#cve-link-status').hidden = true;
+  const id = $('#query').value.trim().toUpperCase();
+  if (archiveMatch?.id !== id) archiveMatch = undefined;
   renderRows();
+  if (/^CVE-\d{4}-\d{4,}$/.test(id) && !data.cves.some((item) => item.id === id)) searchArchivedCve(id);
 });
 $('#rows').addEventListener('click', (event) => {
   const button = event.target.closest('.cve-row');
@@ -1246,7 +1277,7 @@ function advisoryChanges(comparison) {
 function advisoryTranslationSources(item, comparison) {
   const [, solutions, workarounds, requiredAction] = remediationValues(item);
   const changeText = advisoryChanges(comparison).flatMap(({field, before, after}) =>
-    field === remediationFields[0] ? [] : [...before, ...after]);
+    [0, 4, 5].some((index) => field === remediationFields[index]) ? [] : [...before, ...after]);
   return [...new Set([
     item.titleKo ? '' : item.title,
     item.descriptionKo ? '' : englishDescription(item),
@@ -1291,6 +1322,7 @@ function advisoryEvidence(item, translations) {
     ${sourceLink}</details>` : '';
   const [, solutions, workarounds, requiredAction] = remediationValues(item);
   const overview = englishDescription(item);
+  const patches = patchRecords(item);
   return `
     ${pair('취약점 설명', overview, item.descriptionKo || koreanText(overview, translations), descriptionLink)}
     <h3>영향 버전 및 조건</h3>
@@ -1300,9 +1332,9 @@ function advisoryEvidence(item, translations) {
     </div>
     <p class="feed-note">CNA의 제품 범위와 NVD의 CPE 적용 조건을 각각 표시합니다. 제품·플랫폼이 같은지 확인한 뒤 범위를 비교하세요.</p>
     <h3>패치 버전</h3>
-    ${item.fixes?.length ? `<p>cve.now 수정 정보 · ${escape(item.fixes.join(', '))} ${link(item.url, 'cve.now')}</p>` : ''}
-    ${item.describedFixes?.length ? `<p>수집 설명에서 추출 · ${escape(item.describedFixes.join(', '))} ${descriptionLink}</p>` : ''}
-    ${!item.fixes?.length && !item.describedFixes?.length ? `<p>구조화된 패치 버전 미확인 · ${cna}</p>` : ''}
+    ${patches.length ? patches.map(({version,source,url,text}) => `<details>
+      <summary>${escape(version)} · ${escape(source)}</summary><p>${escape(text)}</p>
+      ${link(url, '근거 원문')}</details>`).join('') : `<p>수집된 수정 버전 미확인 · ${cna}</p>`}
     <h3>해결책·완화조치</h3>
     ${[...solutions.map((source) => pair('CNA 해결책',source,koreanText(source,translations),cna)),
       ...workarounds.map((source) => pair('CNA 완화책',source,koreanText(source,translations),cna)),
@@ -1329,13 +1361,12 @@ function advisoryText(item, {comparison, version, translations = new Map()} = {}
   const vulnerableImpacts = impacts(item.vector?.startsWith('CVSS:4.0/') ? 'V' : '');
   const subsequentImpacts = impacts('S');
   const networkPath = metrics.AV === 'N' || metrics.AV === 'A';
-  const [fixes, solutions, workarounds, requiredAction] = remediationValues(item);
+  const [, solutions, workarounds, requiredAction] = remediationValues(item);
+  const patches = patchRecords(item);
+  const fixes = knownPatchVersions(item);
   const cna = cnaRecordUrl(item);
   const nvd = nvdRecordUrl(item);
   const vendors = advisoryReferences(item);
-  const descriptionRefs = item.descriptionEnSource === 'CNA' ? [`- 설명에 명시된 수정 버전 근거(CNA): ${cna}`]
-    : item.descriptionEnSource === 'NVD' ? [`- 설명에 명시된 수정 버전 근거(NVD): ${nvd}`]
-      : [`- 설명에 명시된 수정 버전 확인(NVD): ${nvd}`, `- CNA 레코드: ${cna}`];
   const changes = [];
   if (comparison) {
     const {completed, events, rows} = comparison;
@@ -1343,7 +1374,7 @@ function advisoryText(item, {comparison, version, translations = new Map()} = {}
     if (!completed) changes.push('완료 당시 비교 정보를 확인할 수 없습니다.');
     if (!rows.length && events.length) changes.push('수집된 변경 이력 기준입니다.');
     for (const {field, before, after, at} of advisoryChanges(comparison)) {
-      const value = (entries) => entries.map((entry) => field === remediationFields[0] ? entry
+      const value = (entries) => entries.map((entry) => [0, 4, 5].some((index) => field === remediationFields[index]) ? entry
         : koreanText(entry, translations) || '원문 공지에서 확인').join(' / ') || '기록된 정보 없음';
       changes.push(`- ${field} · 변경 감지 ${at ? date(at) : '시각 미확인'}`,
         `  이전: ${value(before)}`,
@@ -1395,8 +1426,9 @@ function advisoryText(item, {comparison, version, translations = new Map()} = {}
     '5. 조치 방법(패치·완화·보안장비·접근제어)',
     `- 패치: ${fixes.length ? `수집된 수정 버전 ${fixes.join(', ')}. 대상 릴리스의 수정 버전을 벤더 공지에서 확인 후 적용합니다.`
       : '대상 릴리스의 수정 버전과 적용 절차를 벤더 공지에서 확인합니다.'}`,
-    ...(item.fixes?.length && publicUrl(item.url) ? [`- 패치 버전 참고(cve.now): ${publicUrl(item.url)}`] : []),
-    ...(item.describedFixes?.length ? descriptionRefs : []),
+    ...patches.flatMap(({version,source,url}) => publicUrl(url)
+      ? [`- 수정 버전 ${version} · 근거(${source}): ${publicUrl(url)}`] : []),
+    ...(!fixes.length ? [`- 조치 원문 확인(CNA): ${cna}`] : []),
     ...[...new Set(solutions.map(localizedAction))].map((solution) => `  CNA 해결책: ${solution}`),
     ...(workarounds.length ? [...new Set(workarounds.map(localizedAction))].map((workaround) => `- 임시 완화(CNA): ${workaround}`)
       : ['- 임시 완화: 수집된 CNA 권고가 없습니다. 즉시 패치가 어려우면 벤더가 안내한 우회책의 적용 가능 여부를 확인합니다.']),
@@ -1473,10 +1505,34 @@ function advisoryPreflightWarnings(item, text, changed, offline) {
     .map((match) => [match[1], match[2].trim()]));
   const missing = ['1','2','3','4','5'].filter((number) => !sections.get(number));
   if (missing.length) warnings.push(`본문이 비어 있거나 제목이 빠진 항목 · ${missing.join(', ')}번`);
-  const hasLink = (text) => (text?.match(/https?:\/\/[^\s<>]+/g) || []).some(publicUrl);
-  if (!hasLink(sections.get('3'))) warnings.push('영향 범위 항목에 근거 링크를 확인하고 추가하세요.');
-  if (!hasLink(sections.get('5'))) warnings.push('조치 방법 항목에 패치 또는 완화조치의 근거 링크를 추가하세요.');
-  if (!item.fixes?.length && !item.describedFixes?.length) warnings.push('수집 데이터에서 수정 버전이 확인되지 않았습니다. 벤더의 패치 공지를 확인하세요.');
+  const canonical = (address) => {
+    const parsed = publicUrl(address);
+    if (!parsed) return '';
+    const url = new URL(parsed);
+    url.hash = '';
+    url.searchParams.sort();
+    return url.href;
+  };
+  const addresses = (section) => new Set((section?.match(/https?:\/\/[^\s<>]+/g) || [])
+    .map((value) => canonical(value.replace(/[),.;\]]+$/, ''))).filter(Boolean));
+  const scopeLinks = addresses(sections.get('3'));
+  const actionLinks = addresses(sections.get('5'));
+  const refs = [cnaRecordUrl(item), nvdRecordUrl(item), ...advisoryReferences(item)].map(canonical);
+  const patches = patchRecords(item);
+  if (!refs.some((url) => scopeLinks.has(url))) warnings.push('영향 범위 항목에 이 CVE의 수집 근거 링크를 추가하세요.');
+  if (![...refs, ...patches.map((entry) => canonical(entry.url))].filter(Boolean).some((url) => actionLinks.has(url))) {
+    warnings.push('조치 방법 항목에 이 CVE의 패치 또는 완화조치 근거 링크를 추가하세요.');
+  }
+  const actionText = sections.get('5') || '';
+  const writtenVersions = new Set(actionText.split('\n').filter((line) => !line.includes(' · 근거(')
+    && /수정 버전|패치|업데이트|업그레이드|upgrade|update/i.test(line))
+    .flatMap((line) => line.replace(/https?:\/\/\S+/g, '').match(patchVersionPattern) || []));
+  if (!patches.length) warnings.push('수집 데이터에서 수정 버전이 확인되지 않았습니다. 벤더의 패치 공지를 확인하세요.');
+  else {
+    const matched = patches.filter(({version}) => writtenVersions.has(version));
+    if (!matched.length) warnings.push(`조치 방법 본문에 수집된 수정 버전이 없습니다 · ${knownPatchVersions(item).join(', ')}`);
+    else if (!matched.some(({url}) => actionLinks.has(canonical(url)))) warnings.push('본문에 적힌 수정 버전과 연결되는 근거 링크를 조치 방법에 추가하세요.');
+  }
   if (changed) warnings.push('초안 기준 이후 패치 또는 완화 정보가 달라졌습니다. 변경 내용을 확인하고 본문을 갱신하세요.');
   if (offline) warnings.push('현재 수집 목록에 없는 CVE입니다. 공식 원문에서 최신 조치 상태를 확인하세요.');
   return warnings;
@@ -1971,17 +2027,49 @@ $('#source-alert').addEventListener('click', (event) => {
   if (event.target.closest('[data-source-status]')) $('#source-status').open = true;
 });
 
+async function searchArchivedCve(id, focus = false) {
+  if (!/^CVE-\d{4}-\d{4,}$/.test(id) || data.cves.some((record) => record.id === id)) return;
+  const inSearch = () => page === 'cve' && $('#query').value.trim().toUpperCase() === id;
+  if (!inSearch() || archiveMatch?.id === id) return;
+  const status = $('#cve-link-status');
+  status.hidden = false;
+  status.textContent = '브리핑 밖의 보관 CVE를 조회하고 있습니다.';
+  try {
+    if (!archivePromise) {
+      archivePromise = fetch('./cve-archive.json', {cache:'no-cache'}).then((response) => {
+        if (!response.ok) throw Error(`CVE archive HTTP ${response.status}`);
+        return response.json();
+      }).catch((error) => {
+        archivePromise = undefined;
+        throw error;
+      });
+    }
+    const archive = await archivePromise;
+    if (!inSearch()) return;
+    if (archive[id]) {
+      archiveMatch = archive[id];
+      status.textContent = '보관 자료 · 최신 조치 상태는 공식 원문에서 확인하세요.';
+      selectItem(id);
+      if (focus) $('#inspector h2')?.focus();
+      return;
+    }
+    status.innerHTML = `<strong>${escape(id)}</strong> 공개 목록과 보관 자료에 없습니다.
+      ${link(cnaRecordUrl({id}), 'CVE 공식 기록')} ${link(nvdRecordUrl({id}), 'NVD')}`;
+  } catch {
+    if (!inSearch()) return;
+    status.innerHTML = `보관 자료를 읽지 못했습니다. ${link(cnaRecordUrl({id}), 'CVE 공식 기록')} ${link(nvdRecordUrl({id}), 'NVD')}`;
+  }
+}
+
 function openIncomingCve(id) {
   const status = $('#cve-link-status');
   const found = data.cves.some((item) => item.id === id);
-  status.hidden = found;
-  status.innerHTML = found ? '' : `<strong>${escape(id)}</strong> 현재 수집 목록에 없습니다.
-    ${link(`https://www.cve.org/CVERecord?id=${encodeURIComponent(id)}`, 'CVE 공식 기록')}
-    ${link(`https://nvd.nist.gov/vuln/detail/${encodeURIComponent(id)}`, 'NVD')}`;
+  status.hidden = true;
   showPage('cve');
   $('#query').value = id;
   selectItem(found ? id : null);
   if (found) $('#inspector h2')?.focus();
+  else searchArchivedCve(id, true);
 }
 
 async function load(manual = false) {
@@ -2004,7 +2092,8 @@ async function load(manual = false) {
     const currentProduct = $('#product').value;
     data = snapshot;
     debianLookupPromise = undefined;
-    selected = data.cves.find((item) => item.id === currentSelection);
+    archivePromise = undefined;
+    selected = data.cves.find((item) => item.id === currentSelection) || (archiveMatch?.id === currentSelection ? archiveMatch : null);
     priorities = [...data.cves].sort(comparePriority).slice(0, 3);
     const stamp = $('#freshness');
     stamp.dateTime = data.updatedAt;

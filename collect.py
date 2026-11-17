@@ -4,6 +4,7 @@ import concurrent.futures
 import datetime as dt
 import email.utils
 import html
+from html.parser import HTMLParser
 import json
 import os
 from pathlib import Path
@@ -72,6 +73,98 @@ def safe_url(value):
     return parsed.geturl() if parsed.scheme in ('https', 'http') and parsed.hostname and not parsed.username else None
 
 
+MEDIA = '{http://search.yahoo.com/mrss/}'
+ARTICLE_HOSTS = {'dailysecu.com', 'www.dailysecu.com', 'bleepingcomputer.com',
+                 'www.bleepingcomputer.com', 'thehackernews.com', 'zdnet.co.kr', 'www.zdnet.co.kr'}
+
+
+def image_url(value, base):
+    address = safe_url(url.urljoin(base, (value or '').strip()))
+    if address and url.urlsplit(address).scheme == 'https':
+        return address
+    return None
+
+
+def feed_image(item, article_url):
+    for node in item.iter():
+        if node.tag == MEDIA + 'thumbnail' or (
+            node.tag in ('enclosure', MEDIA + 'content') and (
+                node.get('medium') == 'image' or node.get('type', '').startswith('image/')
+            )
+        ):
+            address = image_url(node.get('url'), article_url)
+            if node.get('url') and address:
+                return address
+    return None
+
+
+def publisher_article(address):
+    target = url.urlsplit(address)
+    return (target.scheme == 'https' and target.hostname in ARTICLE_HOSTS
+            and not target.username and target.port in (None, 443))
+
+
+class PublisherRedirect(http.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, message, headers, newurl):
+        if not publisher_article(newurl):
+            return None
+        return super().redirect_request(request, fp, code, message, headers, newurl)
+
+
+class ArticleImage(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.images = {}
+
+    def handle_starttag(self, tag, attrs):
+        if tag != 'meta':
+            return
+        attributes = dict(attrs)
+        property_name = (attributes.get('property') or attributes.get('name') or '').lower()
+        if property_name in ('og:image', 'og:image:secure_url', 'twitter:image') and attributes.get('content'):
+            self.images.setdefault(property_name, attributes['content'])
+
+
+def article_image(address):
+    try:
+        opener = http.build_opener(PublisherRedirect())
+        request = http.Request(address, headers={'User-Agent': 'SecurityInsight/1.0 (public article previews)'})
+        with opener.open(request, timeout=6) as response:
+            if response.headers.get_content_type() != 'text/html':
+                return None
+            parser = ArticleImage()
+            parser.feed(response.read(192 * 1024).decode(response.headers.get_content_charset() or 'utf-8', errors='replace'))
+            for name in ('og:image:secure_url', 'og:image', 'twitter:image'):
+                if name in parser.images:
+                    image = image_url(parser.images[name], response.url)
+                    if image:
+                        return image
+    except (OSError, ValueError, LookupError):
+        pass
+    return None
+
+
+def add_article_images(feeds, previous_feeds):
+    cached = {entry['url']: entry['image'] for entries in previous_feeds.values()
+              for entry in entries if entry.get('image')}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        pending = {}
+        for article in (entry for entries in feeds.values() for entry in entries):
+            address = article['url']
+            image = article.get('image') or cached.get(address)
+            if image:
+                article['image'] = image
+            elif publisher_article(address):
+                if address not in pending:
+                    pending[address] = (pool.submit(article_image, address), [])
+                pending[address][1].append(article)
+        for job, articles in pending.values():
+            image = job.result()
+            if image:
+                for article in articles:
+                    article['image'] = image
+
+
 def rss(name, address, kind):
     root = xml.fromstring(get(address).strip())
     records = []
@@ -84,7 +177,7 @@ def rss(name, address, kind):
         if kind == 'aggregated' and publisher and title.endswith(' - ' + publisher):
             title = title[:-(len(publisher) + 3)]
         records.append(dict(title=title, url=link, publisher=publisher or name, feed=name,
-                            kind=kind, date=timestamp(item.findtext('pubDate', '').strip()),
+                            kind=kind, image=feed_image(item, link), date=timestamp(item.findtext('pubDate', '').strip()),
                             korea=name not in ('The Hacker News', 'BleepingComputer'),
                             dark=bool(DARK.search(title)), cves=sorted(set(CVE.findall((title + ' ' + clean(item.findtext('description'))).upper())))))
     return records[:18]
@@ -198,6 +291,7 @@ def collect():
             nvd.update(attempt('NVD · KEV 보강', lambda: nvd_selected(missing), {}))
         probability = probability_job.result()
 
+    add_article_images(feeds, previous_feeds)
     news, seen = [], set()
     for article in (a for feed in feeds.values() for a in feed):
         key = re.sub(r'[^\w]', '', article['title'].casefold())
@@ -216,7 +310,7 @@ def collect():
     temp = path.with_suffix('.tmp')
     temp.write_text(json.dumps(snapshot, ensure_ascii=False, separators=(',', ':')) + '\n', encoding='utf-8')
     temp.replace(path)
-    print(f'{len(records)} CVEs, {len(news)} linked news items')
+    print(f'{len(records)} CVEs, {len(news)} linked news items, {sum(bool(article.get("image")) for article in news)} with publisher images')
 
 
 if __name__ == '__main__':

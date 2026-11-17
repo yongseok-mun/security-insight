@@ -182,3 +182,12 @@ dialog code { overflow-wrap: anywhere; }
   #priority-inspector { animation:none; }
   .priority-detail span, .update-progress span { transition:none; }
 }
+
+.news-item { display:grid; grid-template-columns:72px minmax(0,1fr); align-items:center; gap:10px; }
+.news-thumb { position:relative; display:grid; place-items:center; width:72px; height:48px; overflow:hidden; border-radius:5px; background:#23232a; color:var(--muted); }
+.news-thumb img { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+.news-item h3, .news-item h4 { overflow-wrap:anywhere; }
+@media(max-width:520px) {
+  .news-item { grid-template-columns:58px minmax(0,1fr); gap:8px; }
+  .news-thumb { width:58px; height:40px; }
+}

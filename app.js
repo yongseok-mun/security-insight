@@ -31,7 +31,7 @@ const date = (value) => value ? `${dateFormat.format(new Date(value))} KST` : '�
 const cvss = (item) => Number.isFinite(item.cvss) ? item.cvss.toFixed(1) : '—';
 const epss = (item) => item.epss ? `${item.epss.score}%` : '—';
 const kev = (item) => item.kev === true ? '등재' : item.kev === false ? '미등재' : '미확인';
-const labels = {home:'보안 브리핑', news:'보안 뉴스', issues:'핵심 이슈', korea:'국내 동향', cve:'CVE 목록', dark:'다크웹 보도'};
+const labels = {home:'보안 브리핑', news:'보안 뉴스', issues:'핵심 이슈', korea:'국내 동향', cve:'주요취약점공지', dark:'다크웹 보도'};
 const comparePriority = (a, b) => Number(b.kev === true) - Number(a.kev === true)
   || (b.cvss ?? -1) - (a.cvss ?? -1) || (b.epss?.score ?? -1) - (a.epss?.score ?? -1)
   || (b.published || '').localeCompare(a.published || '');
@@ -79,7 +79,7 @@ function renderPriority() {
   prioritySelection = item?.id || null;
   panel.hidden = true;
   $('#priority').append(panel);
-  $('#priority').hidden = priorities.length === 0;
+  $('#priority').hidden = page !== 'home' || priorities.length === 0;
   $('#priority-list').innerHTML = priorities.map((entry) => `
     <li><button type="button" class="priority-row" data-cve="${escape(entry.id)}"
       aria-expanded="${entry === item}" aria-controls="priority-inspector">
@@ -204,6 +204,7 @@ function renderInspector(panel = $('#inspector'), item = selected) {
 function showPage(name) {
   if (page !== name) $('#feed').replaceChildren();
   page = name;
+  $('#priority').hidden = page !== 'home' || priorities.length === 0;
   $('#cve-view').hidden = page !== 'cve';
   $('#overview').hidden = page !== 'home';
   $('#feed').hidden = page === 'cve' || page === 'home';
@@ -222,6 +223,24 @@ function showPage(name) {
   }
 }
 
+function newsArticle(item, heading = 'h3') {
+  let image = '';
+  try {
+    const address = new URL(item.image);
+    if (address.protocol === 'https:' && !address.username && !address.password) {
+      image = `<img src="${escape(address.href)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">`;
+    }
+  } catch { /* Some feeds publish headlines without images. */ }
+  return `<article class="news-item">
+    <span class="news-thumb" aria-hidden="true">${icon('news')}${image}</span>
+    <div><small>${escape(item.publisher)} · ${escape(date(item.date))}${item.kind === 'aggregated' ? ' · Google 뉴스 경유' : ''}</small>
+    <${heading}>${link(item.url, item.title)}</${heading}></div></article>`;
+}
+
+document.addEventListener('error', (event) => {
+  if (event.target.matches?.('.news-thumb img')) event.target.hidden = true;
+}, true);
+
 function renderOverview() {
   const sections = [
     ['issues', '핵심 이슈', data.news.filter((article) => article.kind === 'advisory' || article.cves.length)],
@@ -233,9 +252,7 @@ function renderOverview() {
   view.innerHTML = sections.map(([target, title, articles]) => `
     <section class="digest">
       <header><h3>${title}</h3><button data-open="${target}">전체 보기 <span aria-hidden="true">→</span></button></header>
-      ${articles.slice(0, 4).map((article) => `
-        <article><small>${escape(article.publisher)} · ${escape(date(article.date))}</small>
-        <h4>${link(article.url, article.title)}</h4></article>`).join('') || '<p>수집된 항목 없음</p>'}
+      ${articles.slice(0, 4).map((article) => newsArticle(article, 'h4')).join('') || '<p>수집된 항목 없음</p>'}
     </section>`).join('') + `
     <section class="digest digest-cve">
       <header><h3>CVE 우선순위</h3><button data-open="cve">전체 보기 <span aria-hidden="true">→</span></button></header>
@@ -286,9 +303,6 @@ function renderFeed() {
     <div id="articles"></div>`;
   if (sourceNames.includes(before.source)) $('#feed-source').value = before.source;
   $('#news-query').value = before.query;
-  const article = (item) => `<article>
-    <small>${escape(item.publisher)} · ${escape(date(item.date))}${item.kind === 'aggregated' ? ' · Google 뉴스 경유' : ''}</small>
-    <h3>${link(item.url, item.title)}</h3></article>`;
   const display = () => {
     const items = filteredNews();
     document.querySelectorAll('[data-news]').forEach((button) =>
@@ -302,8 +316,8 @@ function renderFeed() {
       }
     }
     $('#articles').innerHTML = (newsMode === 'topic' ? [...groups].map(([name, entries]) =>
-      `<section class="news-topic"><h3>${escape(name)} <span>${entries.length}건</span></h3>${entries.map(article).join('')}</section>`).join('')
-      : items.map(article).join('')) || '<p>조건에 맞는 기사가 없습니다.</p>';
+      `<section class="news-topic"><h3>${escape(name)} <span>${entries.length}건</span></h3>${entries.map((item) => newsArticle(item)).join('')}</section>`).join('')
+      : items.map((item) => newsArticle(item)).join('')) || '<p>조건에 맞는 기사가 없습니다.</p>';
   };
   document.querySelectorAll('[data-news]').forEach((button) => button.addEventListener('click', () => {
     newsMode = button.dataset.news;

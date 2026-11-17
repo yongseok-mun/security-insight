@@ -9,8 +9,8 @@
 <script src="app.js" defer></script>
 </head>
 <body>
-<aside class="sidebar">
-  <div class="brand"><span data-icon="shield"></span><span>Security<br>Insight</span></div>
+<header class="site-header"><div class="header-content">
+  <div class="brand"><span data-icon="shield"></span><span>Security Insight</span></div>
   <nav aria-label="보안 인텔리전스">
     <button data-page="home" aria-current="page"><span data-icon="chart"></span>브리핑</button>
     <button data-page="news"><span data-icon="news"></span>보안 뉴스</button>
@@ -19,7 +19,7 @@
     <button data-page="cve"><span data-icon="shield"></span>CVE</button>
     <button data-page="dark"><span data-icon="user"></span>다크웹 보도</button>
   </nav>
-</aside>
+</div></header>
 <main>
   <section class="priority" id="priority" aria-labelledby="priority-title" hidden>
     <h1 id="priority-title">오늘 먼저 확인할 항목</h1>
@@ -35,21 +35,23 @@
     </header>
     <section id="overview" class="overview" aria-label="오늘의 보안 동향"></section>
     <div id="cve-view" hidden>
-      <form id="filters" aria-label="CVE 검색 및 필터">
-        <label class="search"><span data-icon="search"></span><input id="query" type="search" aria-label="CVE 검색" placeholder="CVE ID, 제품 또는 키워드 검색"></label>
-        <label class="kev-control"><input id="kev" type="checkbox">KEV 등재만 보기</label>
-        <select id="product" aria-label="제품"><option value="">모든 제품</option></select>
-      </form>
-      <div class="workspace-grid">
-        <section class="panel results" aria-label="CVE 목록">
-          <table>
-            <thead><tr><th scope="col">취약점</th><th scope="col"><button data-sort="cvss">CVSS <span></span></button></th><th scope="col"><button data-sort="epss">EPSS <span></span></button></th><th scope="col"><button data-sort="kev">KEV <span></span></button></th></tr></thead>
-            <tbody id="rows"></tbody>
-          </table>
-          <footer id="count" aria-live="polite"></footer>
-        </section>
-        <section class="panel inspector" id="inspector" aria-label="선택한 CVE 상세"></section>
+      <div class="cve-toolbar">
+        <div class="presets" role="group" aria-label="CVE 보기">
+          <button data-view="latest" aria-pressed="true">최신</button>
+          <button data-view="critical" aria-pressed="false">치명적</button>
+          <button data-view="kev" aria-pressed="false">KEV</button>
+          <button data-view="epss" aria-pressed="false">EPSS</button>
+        </div>
+        <form id="filters" aria-label="CVE 검색 및 필터">
+          <label class="search"><span data-icon="search"></span><input id="query" type="search" aria-label="CVE 검색" placeholder="CVE ID 또는 제품 검색"></label>
+          <select id="product" aria-label="제품"><option value="">모든 제품</option></select>
+        </form>
       </div>
+      <section class="results" aria-label="CVE 목록">
+        <ul id="rows" class="cve-list"></ul>
+        <footer id="count" aria-live="polite"></footer>
+      </section>
+      <section class="inspector" id="inspector" aria-label="선택한 CVE 상세" hidden></section>
     </div>
     <section class="panel feed" id="feed" hidden></section>
   </section>

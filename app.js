@@ -31,7 +31,7 @@ const date = (value) => value ? `${dateFormat.format(new Date(value))} KST` : '�
 const cvss = (item) => Number.isFinite(item.cvss) ? item.cvss.toFixed(1) : '—';
 const epss = (item) => item.epss ? `${item.epss.score}%` : '—';
 const kev = (item) => item.kev === true ? '등재' : item.kev === false ? '미등재' : '미확인';
-const labels = {home:'보안 브리핑', news:'보안 뉴스', issues:'핵심 이슈', korea:'국내 동향', cve:'CVE 우선순위', dark:'다크웹 보도'};
+const labels = {home:'보안 브리핑', news:'보안 뉴스', issues:'핵심 이슈', korea:'국내 동향', cve:'CVE 목록', dark:'다크웹 보도'};
 const comparePriority = (a, b) => Number(b.kev === true) - Number(a.kev === true)
   || (b.cvss ?? -1) - (a.cvss ?? -1) || (b.epss?.score ?? -1) - (a.epss?.score ?? -1)
   || (b.published || '').localeCompare(a.published || '');
@@ -49,30 +49,23 @@ let data = {cves:[], news:[], sources:{}};
 let selected;
 let priority;
 let page = 'home';
-let sort = {key:null, direction:-1};
-const metricValue = {
-  cvss: (item) => item.cvss,
-  epss: (item) => item.epss?.score,
-  kev: (item) => item.kev == null ? null : Number(item.kev),
-};
+let view = 'latest';
+const newest = (a, b) => (Date.parse(b.published) || 0) - (Date.parse(a.published) || 0)
+  || a.id.localeCompare(b.id);
 
 function rowsForFilters() {
   const terms = $('#query').value.trim().toLowerCase().split(/\s+/).filter(Boolean);
   const product = $('#product').value;
   const rows = data.cves.filter((item) => {
     const text = [item.id, item.title, item.product, ...item.fixes, item.description].join(' ').toLowerCase();
-    return terms.every((term) => text.includes(term))
-      && (!$('#kev').checked || item.kev === true) && (!product || item.product === product);
+    return terms.every((term) => text.includes(term)) && (!product || item.product === product)
+      && (view !== 'kev' || item.kev === true)
+      && (view !== 'critical' || item.cvss >= 9)
+      && (view !== 'epss' || item.epss != null);
   });
-  const value = metricValue[sort.key];
-  return rows.sort((a, b) => {
-    if (!value) return comparePriority(a, b);
-    const first = value(a);
-    const second = value(b);
-    if (first == null) return second == null ? comparePriority(a, b) : 1;
-    if (second == null) return -1;
-    return (first - second) * sort.direction || comparePriority(a, b);
-  });
+  if (view === 'epss') return rows.sort((a, b) => b.epss.score - a.epss.score || newest(a, b));
+  if (view === 'kev') return rows.sort((a, b) => (b.kevDate || '').localeCompare(a.kevDate || '') || newest(a, b));
+  return rows.sort(newest);
 }
 
 function renderPriority() {
@@ -89,23 +82,39 @@ function renderPriority() {
 
 function renderRows() {
   const records = rowsForFilters();
-  if (!records.includes(selected)) selected = records[0];
+  if (!records.includes(selected)) selected = null;
+  const inspector = $('#inspector');
+  inspector.hidden = true;
+  $('#cve-view').append(inspector);
+
   $('#rows').innerHTML = records.map((item) => {
     const active = item === selected;
-    const severity = item.cvss >= 9 ? 'critical' : item.cvss >= 7 ? 'high' : '';
-    return `<tr class="${active ? 'selected' : ''}">
-      <td><button type="button" aria-pressed="${active}" data-id="${escape(item.id)}"><strong>${escape(item.id)}</strong><small>${escape(item.title)}</small></button></td>
-      <td><span class="pill ${severity}">${cvss(item)}</span></td><td>${epss(item)}</td>
-      <td><span class="pill ${item.kev === true ? 'critical' : ''}">${kev(item)}</span></td>
-    </tr>`;
-  }).join('') || '<tr><td class="empty" colspan="4">조건에 맞는 CVE가 없습니다.</td></tr>';
+    const severity = item.cvss >= 9 ? 'critical' : item.cvss >= 7 ? 'high' : item.cvss >= 4 ? 'medium' : '';
+    return `<li>
+      <button class="cve-row" type="button" data-id="${escape(item.id)}"
+        aria-expanded="${active}" ${active ? 'aria-controls="inspector"' : ''}>
+        <span class="cve-id">${escape(item.id)}</span>
+        <span class="cve-description"><strong>${escape(item.title)}</strong>${item.product ? `<small>${escape(item.product)}</small>` : ''}</span>
+        <span class="cve-meta">
+          <span class="pill ${severity}">CVSS ${cvss(item)}</span>
+          ${item.kev === true ? '<span class="pill kev">KEV</span>' : ''}
+          ${item.fixes.length ? '<span class="pill fix">수정 버전</span>' : ''}
+          ${view === 'epss' ? `<span class="pill">EPSS ${epss(item)}</span>` : ''}
+          ${item.published ? `<time datetime="${escape(item.published)}">${escape(date(item.published))}</time>` : ''}
+        </span>
+      </button>
+    </li>`;
+  }).join('') || '<li class="empty">조건에 맞는 CVE가 없습니다.</li>';
+
   $('#count').textContent = `총 ${records.length}건`;
-  document.querySelectorAll('[data-sort]').forEach((button) => {
-    const active = button.dataset.sort === sort.key;
-    button.querySelector('span').textContent = active ? (sort.direction === 1 ? '↑' : '↓') : '';
-    button.closest('th').setAttribute('aria-sort', active ? (sort.direction === 1 ? 'ascending' : 'descending') : 'none');
+  document.querySelectorAll('[data-view]').forEach((button) => {
+    button.setAttribute('aria-pressed', String(button.dataset.view === view));
   });
-  renderInspector();
+  if (selected) {
+    renderInspector();
+    $('#rows [aria-expanded="true"]').after(inspector);
+    inspector.hidden = false;
+  }
 }
 
 function evidence(item) {
@@ -239,15 +248,14 @@ function selectItem(id) {
 $('#filters').addEventListener('submit', (event) => event.preventDefault());
 $('#filters').addEventListener('input', renderRows);
 $('#rows').addEventListener('click', (event) => {
-  const button = event.target.closest('[data-id]');
+  const button = event.target.closest('.cve-row');
   if (!button) return;
-  selectItem(button.dataset.id);
-  if (matchMedia('(max-width:730px)').matches) $('#inspector h2').focus();
-  else [...document.querySelectorAll('[data-id]')].find((control) => control.dataset.id === selected.id)?.focus();
+  const id = button.dataset.id;
+  selectItem(selected?.id === id ? null : id);
+  [...document.querySelectorAll('.cve-row')].find((row) => row.dataset.id === id)?.focus();
 });
-document.querySelectorAll('[data-sort]').forEach((button) => button.addEventListener('click', () => {
-  const key = button.dataset.sort;
-  sort = {key, direction:sort.key === key ? -sort.direction : -1};
+document.querySelectorAll('[data-view]').forEach((button) => button.addEventListener('click', () => {
+  view = button.dataset.view;
   renderRows();
 }));
 document.querySelectorAll('[data-page]').forEach((button) => button.addEventListener('click', () => showPage(button.dataset.page)));
@@ -261,6 +269,7 @@ $('#overview').addEventListener('click', (event) => {
   const item = event.target.closest('[data-cve]');
   if (item) {
     $('#filters').reset();
+    view = 'latest';
     showPage('cve');
     selectItem(item.dataset.cve);
     $('#inspector h2').focus();
@@ -270,6 +279,7 @@ $('#top-check').addEventListener('click', () => showGuide(priority, 'check'));
 $('#top-source').addEventListener('click', () => {
   showPage('cve');
   $('#filters').reset();
+  view = 'latest';
   selectItem(priority.id);
   const disclosure = $('#source-list details');
   disclosure.open = true;
@@ -290,7 +300,6 @@ async function load() {
       `<li>${escape(name)} <span>${states[status.state]} · ${status.count}건${status.at ? ` · ${escape(date(status.at))}` : ''}</span></li>`).join('');
     const products = [...new Set(data.cves.map((item) => item.product).filter(Boolean))].sort();
     products.forEach((product) => $('#product').add(new Option(product, product)));
-    selected = priority;
     renderPriority();
     renderRows();
     if (page === 'home') renderOverview();

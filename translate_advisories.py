@@ -21,6 +21,7 @@ TECHNICAL_TERMS = {
     r'\bcommands?\b': r'명령|커맨드',
     r'\b(?:authentication|authorization)\b': r'인증|인가|권한',
     r'\b(?:vulnerable|vulnerability)\b': r'취약|보안 결함',
+    r'\b(?:as root|root privileges|root access)\b': r'root|루트|관리자',
 }
 LIMIT = 140
 
@@ -58,12 +59,12 @@ def translate(sources):
     # The released checkpoint requires separate source and target vocabularies.
     tokenizer = AutoTokenizer.from_pretrained(MODEL, revision=TOKENIZER_REVISION)
     model = AutoModelForSeq2SeqLM.from_pretrained(MODEL, revision=REVISION, use_safetensors=True).eval()
-    canary = 'An attacker can execute commands as root.'
+    canary = 'An attacker can execute arbitrary commands.'
     with torch.inference_mode():
         output = model.generate(**tokenizer(canary, return_tensors='pt'), max_new_tokens=48)
     translated = tokenizer.decode(output[0], skip_special_tokens=True)
-    if not valid_translation(canary, translated) or not re.search(r'root|루트|관리자', translated, re.I):
-        raise ValueError('Korean model failed the security terminology smoke test')
+    if not valid_translation(canary, translated) or '공격' not in translated:
+        raise ValueError(f'Korean model failed the security terminology smoke test: {translated!r}')
     for index in range(0, len(sources), 8):
         if time.monotonic() >= deadline:
             break

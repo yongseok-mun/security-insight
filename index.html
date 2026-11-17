@@ -5,12 +5,12 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="description" content="CVE 우선순위, 영향 범위, 안전한 점검과 출처를 한 화면에서 확인하는 보안 인텔리전스 대시보드">
 <title>Security Insight</title>
-<link rel="stylesheet" href="style.css?v=cve-6">
+<link rel="stylesheet" href="style.css?v=triage-7">
 <style>
   .brand-text { display: flex; flex-direction: column; line-height: 1.3; }
   .brand-text small { color: var(--muted); font-size: 11px; font-weight: 500; }
 </style>
-<script src="app.js?v=cve-6" defer></script>
+<script src="app.js?v=triage-7" defer></script>
 </head>
 <body>
 <header class="site-header"><div class="header-content">
@@ -27,7 +27,7 @@
 <main>
   <div class="status-bar">
     <div class="update-times">
-      <span>마지막 업데이트 <time id="freshness">불러오는 중</time></span>
+      <span>마지막 게시 <time id="freshness">불러오는 중</time></span>
       <span>다음 수집 예정 <time id="next-update">—</time> <span id="countdown" role="timer">—</span></span>
     </div>
     <div class="status-actions">
@@ -36,6 +36,7 @@
     </div>
     <div class="update-progress" aria-hidden="true"><span id="update-progress"></span></div>
     <p id="refresh-note" role="status"></p>
+    <div id="source-alert" class="source-alert" hidden></div>
   </div>
   <section class="priority" id="priority" aria-labelledby="priority-title" hidden>
     <h1 id="priority-title">오늘 먼저 확인할 항목</h1>
@@ -48,6 +49,7 @@
     </header>
     <section id="overview" class="overview" aria-label="오늘의 보안 동향"></section>
     <div id="cve-view" hidden>
+      <div id="cve-link-status" class="source-alert" hidden></div>
       <div class="cve-toolbar">
         <div class="presets" role="group" aria-label="CVE 보기">
           <button data-view="latest" aria-pressed="true">최신</button>
@@ -68,7 +70,7 @@
     </div>
     <section class="panel feed" id="feed" hidden></section>
   </section>
-  <details class="source-status"><summary>데이터 수집 상태</summary><ul id="source-status-list"></ul><p>이 서비스는 NVD 데이터를 사용하며 NVD의 보증이나 인증을 받지 않았습니다.</p></details>
+  <details class="source-status" id="source-status"><summary>데이터 수집 상태</summary><ul id="source-status-list"></ul><p>이 서비스는 NVD 데이터를 사용하며 NVD의 보증이나 인증을 받지 않았습니다.</p></details>
 </main>
 <dialog id="guide" aria-labelledby="guide-title">
   <form method="dialog" class="close"><button aria-label="닫기">×</button></form>

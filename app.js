@@ -45,6 +45,13 @@ const link = (address, label) => {
   return '';
 };
 
+const requestedCve = new URL(location.href).searchParams.get('cve')?.trim().toUpperCase();
+const incomingCve = /^CVE-\d{4}-\d{4,}$/.test(requestedCve || '') ? requestedCve : null;
+const cveUrl = (id) => {
+  const url = new URL(location.pathname, location.origin);
+  url.searchParams.set('cve', id);
+  return url.href;
+};
 let data = {cves:[], news:[], sources:{}};
 let selected;
 let priorities = [];
@@ -207,7 +214,7 @@ function bilingual(item) {
       <div><h4>한국어${korean && item.translationSource ? ` <small>${escape(item.translationSource)}</small>` : ''}</h4>
       <p class="cve-summary" data-translation>${escape(korean || '등록된 한국어 설명이 없습니다.')}</p>
       ${showMachine ? '<button class="utility" type="button" data-translate>한국어로 번역</button>' : ''}</div>
-      <div lang="en"><h4>English</h4><p class="cve-summary">${escape(english || 'No English description was collected.')}</p></div>
+      <details class="english-original" lang="en"><summary>English original · 영문 원문</summary><p class="cve-summary">${escape(english || 'No English description was collected.')}</p></details>
     </div>`;
 }
 
@@ -259,6 +266,34 @@ async function translateDescription(button, item) {
   }
 }
 
+function actionSummary(item) {
+  const affected = item.cna?.affected || [];
+  const ranges = affected.flatMap((product) => product.versions
+    .filter((entry) => entry.status === 'affected' || (entry.changes || []).some((change) => change.status === 'affected'))
+    .map((entry) => `${product.product || item.product || '제품 미확인'} · ${versionLabel(entry)}`));
+  const conditions = attackConditions(item);
+  const fixes = [...new Set([...item.fixes, ...(item.describedFixes || [])])];
+  const platforms = [...new Set(affected.flatMap((product) => product.platforms || []))];
+  const modules = [...new Set(affected.flatMap((product) => product.modules || []))];
+  const firstCheck = [
+    '설치 버전·빌드를 영향 범위와 대조하세요.',
+    platforms.length ? `대상 플랫폼 · ${platforms.join(', ')}.` : '',
+    modules.length ? `구성요소 사용 여부 · ${modules.join(', ')}.` : '',
+    conditions.includes('접근 경로 · 네트워크') ? '관리 대상 서비스의 접근 가능 경로도 확인하세요.' : '',
+  ].filter(Boolean).join(' ');
+  const visibleRanges = ranges.slice(0, 3).map(escape).join('<br>');
+  return `
+    <section class="action-summary">
+      <h3>조치 요약</h3>
+      <dl>
+        <div><dt>영향 버전 <small>CNA</small></dt><dd>${visibleRanges || '명시된 영향 버전 미확인. 아래 영향 범위와 공지를 확인하세요.'}${ranges.length > 3 ? `<br><small>외 ${ranges.length - 3}개 범위 · 아래 영향 범위에 전체 표시</small>` : ''}</dd></div>
+        <div><dt>성립 조건 <small>CVSS 기준</small></dt><dd>${escape(conditions.length ? conditions.join(' / ') : '구조화된 조건 미확인')}${conditions.length ? '<br><small>제품별 설정·기능 조건은 아래 설명과 원문 참조</small>' : ''}</dd></div>
+        <div><dt>수정 버전</dt><dd>${escape(fixes.length ? fixes.join(', ') : item.cna?.solutions?.[0] || '수정 버전 미확인 · 벤더 공지 참조')}</dd></div>
+        <div><dt>첫 점검</dt><dd>${escape(firstCheck)}</dd></div>
+      </dl>
+    </section>`;
+}
+
 function renderInspector(panel = $('#inspector'), item = selected) {
   if (!item) {
     panel.innerHTML = '<p class="empty">표시할 CVE가 없습니다.</p>';
@@ -271,16 +306,22 @@ function renderInspector(panel = $('#inspector'), item = selected) {
       <div>CVSS ${item.cvssVersion ? `v${escape(item.cvssVersion)}` : ''}<strong>${cvss(item)}</strong></div>
       <div>EPSS<strong>${epss(item)}</strong></div><div>KEV<strong>${kev(item)}</strong></div>
     </div>
+    ${actionSummary(item)}
+    <div class="actions triage-actions">
+      <button class="outline" data-guide="check">${icon('shield')}안전한 점검</button>
+      <button class="outline" type="button" data-copy-cve>${icon('link')}이 CVE 링크 복사</button>
+      <span class="copy-status" role="status"></span>
+    </div>
     <div class="technical-details">${technicalDetails(item)}</div>
     <h3>출처 확인</h3>
     <div class="source-list">${evidence(item)}</div>
-    <div class="actions">
-      <button class="accent" data-guide="analysis">${icon('search')}CVE 상세</button>
-      <button class="outline" data-guide="check">${icon('shield')}안전한 점검</button>
-    </div>`;
+    <div class="actions"><button class="accent" data-guide="analysis">${icon('search')}CVE 상세</button></div>`;
 }
 
 function showPage(name) {
+  if (name !== 'cve' && new URL(location.href).searchParams.has('cve')) {
+    history.replaceState(null, '', location.pathname);
+  }
   if (page !== name) $('#feed').replaceChildren();
   page = name;
   $('#priority').hidden = page !== 'home' || priorities.length === 0;
@@ -433,7 +474,10 @@ function selectItem(id) {
 }
 
 $('#filters').addEventListener('submit', (event) => event.preventDefault());
-$('#filters').addEventListener('input', renderRows);
+$('#filters').addEventListener('input', () => {
+  $('#cve-link-status').hidden = true;
+  renderRows();
+});
 $('#rows').addEventListener('click', (event) => {
   const button = event.target.closest('.cve-row');
   if (!button) return;
@@ -452,6 +496,25 @@ function detailsAction(event, item) {
   const translate = event.target.closest('[data-translate]');
   if (button) showGuide(item, button.dataset.guide);
   if (translate) translateDescription(translate, item);
+  const copy = event.target.closest('[data-copy-cve]');
+  if (copy) copyCveLink(copy, item);
+}
+
+async function copyCveLink(button, item) {
+  const status = button.parentElement.querySelector('.copy-status');
+  const url = cveUrl(item.id);
+  try {
+    await navigator.clipboard.writeText(url);
+    status.textContent = '링크를 복사했습니다.';
+  } catch {
+    const input = document.createElement('input');
+    input.type = 'url';
+    input.readOnly = true;
+    input.value = url;
+    input.setAttribute('aria-label', 'CVE 공유 링크');
+    status.replaceChildren(input);
+    input.select();
+  }
 }
 let guideItem;
 $('#inspector').addEventListener('click', (event) => detailsAction(event, selected));
@@ -491,7 +554,7 @@ function buildMail() {
   if (cves.length) sections.push(['우선 확인할 CVE', cves.map((item) => ({
     title: `${item.id} · ${item.title}`,
     meta: `CVSS ${cvss(item)} · EPSS ${epss(item)} · KEV ${kev(item)}`,
-    url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(item.id)}`,
+    url: cveUrl(item.id),
     note: item.fixes.length ? `수정 버전 ${item.fixes.join(', ')}` : '',
   }))]);
   if (page !== 'cve') {
@@ -558,6 +621,37 @@ $('#email-form').addEventListener('submit', (event) => {
   setTimeout(() => URL.revokeObjectURL(url), 30000);
 });
 
+function showSourceStatus() {
+  const states = {ok:'수집', stale:'이전 데이터', unavailable:'수집 실패'};
+  const entries = Object.entries(data.sources);
+  $('#source-status-list').innerHTML = entries.map(([name, status]) =>
+    `<li>${escape(name)} <span>${escape(states[status.state] || '미확인')} · ${status.count}건${status.at ? ` · ${escape(date(status.at))}` : ''}</span></li>`).join('');
+  const alert = $('#source-alert');
+  const delayed = entries.filter(([, status]) => status.state === 'stale' || status.state === 'unavailable');
+  alert.hidden = delayed.length === 0;
+  alert.innerHTML = delayed.length ? `
+    <strong>일부 출처 지연</strong>
+    <span>${delayed.map(([name, status]) => `${escape(name)} · ${status.at ? `마지막 성공 ${escape(date(status.at))}` : '수집 실패'}`).join(' / ')}</span>
+    <a href="#source-status" data-source-status>전체 상태 보기</a>` : '';
+}
+
+$('#source-alert').addEventListener('click', (event) => {
+  if (event.target.closest('[data-source-status]')) $('#source-status').open = true;
+});
+
+function openIncomingCve(id) {
+  const status = $('#cve-link-status');
+  const found = data.cves.some((item) => item.id === id);
+  status.hidden = found;
+  status.innerHTML = found ? '' : `<strong>${escape(id)}</strong> 현재 수집 목록에 없습니다.
+    ${link(`https://www.cve.org/CVERecord?id=${encodeURIComponent(id)}`, 'CVE 공식 기록')}
+    ${link(`https://nvd.nist.gov/vuln/detail/${encodeURIComponent(id)}`, 'NVD')}`;
+  showPage('cve');
+  $('#query').value = id;
+  selectItem(found ? id : null);
+  if (found) $('#inspector h2')?.focus();
+}
+
 async function load(manual = false) {
   if (loading) return;
   loading = true;
@@ -584,15 +678,14 @@ async function load(manual = false) {
     stamp.textContent = date(data.updatedAt);
     updateClock(data.updatedAt);
     $('#open-email').disabled = false;
-    const states = {ok:'수집', stale:'이전 데이터', unavailable:'수집 실패'};
-    $('#source-status-list').innerHTML = Object.entries(data.sources).map(([name, status]) =>
-      `<li>${escape(name)} <span>${states[status.state]} · ${status.count}건${status.at ? ` · ${escape(date(status.at))}` : ''}</span></li>`).join('');
+    showSourceStatus();
     const products = [...new Set(data.cves.map((item) => item.product).filter(Boolean))].sort();
     $('#product').replaceChildren(new Option('모든 제품', ''), ...products.map((product) => new Option(product, product)));
     if (products.includes(currentProduct)) $('#product').value = currentProduct;
     renderPriority();
     renderRows();
-    if (page === 'home') renderOverview();
+    if (!alreadyLoaded && incomingCve) openIncomingCve(incomingCve);
+    else if (page === 'home') renderOverview();
     else if (page !== 'cve') renderFeed();
     if (manual || alreadyLoaded) note.textContent = '새 데이터가 반영됐습니다.';
   } catch (error) {

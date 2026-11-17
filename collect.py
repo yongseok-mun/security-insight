@@ -3,6 +3,7 @@
 import concurrent.futures
 import datetime as dt
 import email.utils
+import gzip
 import html
 import hashlib
 from html.parser import HTMLParser
@@ -27,6 +28,8 @@ SECURITY = re.compile(r'보안|해킹|침해|취약점|랜섬웨어|정보.?유�
 GOOGLE = 'https://news.google.com/rss/search?'
 NVD = 'https://services.nvd.nist.gov/rest/json/cves/2.0'
 KEV = 'https://raw.githubusercontent.com/cisagov/kev-data/develop/known_exploited_vulnerabilities.json'
+DEBIAN_TRACKER = 'https://security-tracker.debian.org/tracker/data/json'
+DEBIAN_SUITES = ('bullseye', 'bookworm', 'trixie')
 
 
 def google(query):
@@ -368,6 +371,37 @@ def moment(value):
     return dt.datetime.fromisoformat(normalized) if normalized else None
 
 
+def debian_packages(tracker, cve_ids=None):
+    matches = {}
+    for package, issues in tracker.items():
+        for cve_id in cve_ids.intersection(issues) if cve_ids is not None else issues:
+            if not CVE.fullmatch(cve_id):
+                continue
+            releases = issues[cve_id].get('releases', {})
+            for suite in DEBIAN_SUITES:
+                entry = releases.get(suite, {})
+                fixed = entry.get('fixed_version')
+                if entry.get('status') == 'resolved' and isinstance(fixed, str) and fixed != '0' and re.match(r'^[0-9]', fixed):
+                    matches.setdefault(cve_id, []).append(dict(package=package, suite=suite, fixed=fixed))
+    return matches
+
+
+def fetch_debian_packages():
+    request = http.Request(DEBIAN_TRACKER, headers={
+        'Accept-Encoding': 'gzip', 'User-Agent': 'SecurityInsight/1.0 (public security feeds)',
+    })
+    limit = 128 * 1024 * 1024
+    with http.urlopen(request, timeout=28) as response:
+        if response.headers.get('Content-Encoding') == 'gzip':
+            with gzip.GzipFile(fileobj=response) as decoded:
+                payload = decoded.read(limit + 1)
+        else:
+            payload = response.read(limit + 1)
+    if len(payload) > limit:
+        raise ValueError('Debian tracker exceeds the expected maximum size')
+    return debian_packages(json.loads(payload))
+
+
 def candidates(feed, nvd, kev, previous):
     previous_at = previous.get('updatedAt')
     cutoff = NOW - dt.timedelta(days=HISTORY_DAYS)
@@ -488,13 +522,18 @@ def collect():
     previous = json.loads(path.read_text()) if path.exists() else {}
     previous_feeds = previous.get('feeds', {})
     statuses = {}
+    debian_cache = ROOT / '.feed-cache' / 'debian-packages.json'
+    try:
+        previous_debian = json.loads(debian_cache.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        previous_debian = {}
 
     def attempt(name, job, fallback):
         try:
             result = job()
             statuses[name] = dict(state='ok', at=NOW.isoformat(), count=len(result))
             return result
-        except (OSError, ValueError, KeyError, TypeError, xml.ParseError) as error:
+        except (OSError, ValueError, KeyError, TypeError, EOFError, xml.ParseError) as error:
             print(f'{name}: {error}', file=sys.stderr)
             prior = previous.get('sources', {}).get(name, {})
             statuses[name] = dict(state='stale' if fallback else 'unavailable', at=prior.get('at'), count=len(fallback))
@@ -514,6 +553,7 @@ def collect():
         nvd = nvd_job.result()
         items = candidates(feed, nvd, kev, previous)
         old_rows = {entry['id']: entry for entry in previous.get('cves', [])}
+        debian_job = pool.submit(attempt, 'Debian Security Tracker', fetch_debian_packages, previous_debian)
         if statuses['cve.now']['state'] == 'unavailable' and any(row.get('origin') == 'cve.now' for row in old_rows.values()):
             prior = previous.get('sources', {}).get('cve.now', {})
             statuses['cve.now'] = dict(state='stale', at=prior.get('at'), count=prior.get('count', 0))
@@ -523,6 +563,7 @@ def collect():
         supplement = attempt('NVD · KEV 보강', lambda: nvd_selected(missing), {}) if missing else {}
         nvd.update(supplement)
         probability = probability_job.result()
+        debian = debian_job.result()
 
     add_article_images(feeds, previous_feeds)
     news, seen = [], set()
@@ -535,6 +576,9 @@ def collect():
     merge_status = {**statuses, 'nvdSupplementIds': supplement.keys()}
     records = [merge_record(item, old_rows.get(item['id'], {}), nvd, kev, probability, news, merge_status)
                for item in items]
+    for record in records:
+        if record['id'] in debian:
+            record['debianPackages'] = debian[record['id']]
     if not records:
         raise SystemExit('No valid CVE snapshot available')
     translation_file = ROOT / 'cve-ko.json'
@@ -545,6 +589,10 @@ def collect():
     temp = path.with_suffix('.tmp')
     temp.write_text(json.dumps(snapshot, ensure_ascii=False, separators=(',', ':')) + '\n', encoding='utf-8')
     temp.replace(path)
+    lookup = ROOT / 'debian-packages.json'
+    lookup_temp = lookup.with_suffix('.tmp')
+    lookup_temp.write_text(json.dumps(debian, ensure_ascii=False, separators=(',', ':')) + '\n', encoding='utf-8')
+    lookup_temp.replace(lookup)
     print(f'{len(records)} CVEs, {len(news)} linked news items, {sum(bool(article.get("image")) for article in news)} with publisher images')
 
 

@@ -371,3 +371,18 @@ dialog code { overflow-wrap: anywhere; }
 .advisory-draft-changes { border-color:#855529; }
 [data-export-batch]:disabled { opacity:.5; cursor:default; }
 @media(max-width:520px) { .evidence-columns { grid-template-columns:1fr; } }
+
+.my-work-row { display:flex; align-items:center; justify-content:space-between; gap:8px 14px; padding:8px 0; border-bottom:1px solid var(--line); }
+.my-work-row > div:first-child { min-width:0; overflow-wrap:anywhere; }
+.my-work-row small { display:block; color:var(--muted); }
+.my-work-row strong { display:block; margin:2px 0 5px; }
+.my-work > details { margin:8px 0; }
+.my-work-row .watch-badges { justify-content:flex-start; }
+.advisory-preflight { margin:10px 0; padding:8px 11px; border:1px solid #51414f; border-radius:5px; }
+.advisory-preflight summary { font-weight:650; }
+[data-advisory-preflight-count] { color:var(--muted); font-size:12px; }
+.debian-command { white-space:pre-wrap; overflow-wrap:anywhere; font-size:12px; }
+@media(max-width:520px) { .my-work-row { flex-wrap:wrap; } }
+#debian-lookup { display:flex; align-items:end; flex-wrap:wrap; gap:8px; }
+#debian-lookup label { display:grid; gap:4px; }
+#debian-lookup input { min-height:38px; padding:5px 8px; background:var(--surface); border:1px solid #404049; border-radius:5px; }

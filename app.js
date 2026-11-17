@@ -417,6 +417,127 @@ function compareProductLabel(product, fallback) {
   return [name, ...(product.platforms || []), ...(product.modules || [])].join(' · ');
 }
 
+const debianSuites = {bullseye:'Debian 11 (bullseye)', bookworm:'Debian 12 (bookworm)', trixie:'Debian 13 (trixie)'};
+const debianRecordUrl = (item) => `https://security-tracker.debian.org/tracker/${encodeURIComponent(item.id)}`;
+
+function debianVersionParts(value) {
+  const match = /^(?:(\d+):)?([0-9][A-Za-z0-9.+:~\-]*)$/.exec(value);
+  if (!match || (!match[1] && match[2].includes(':'))) return null;
+  const lastDash = match[2].lastIndexOf('-');
+  if (lastDash < 0) return [BigInt(match[1] || 0), match[2], '0'];
+  const revision = match[2].slice(lastDash + 1);
+  if (!/^[A-Za-z0-9+.~]+$/.test(revision)) return null;
+  return [BigInt(match[1] || 0), match[2].slice(0, lastDash), revision];
+}
+
+function compareDebianSegment(left, right) {
+  const digit = (char) => Boolean(char && /[0-9]/.test(char));
+  const order = (char) => {
+    if (char === '~') return -1;
+    if (!char || digit(char)) return 0;
+    return char.charCodeAt(0) + (/[A-Za-z]/.test(char) ? 0 : 256);
+  };
+  let a = 0, b = 0;
+  while (a < left.length || b < right.length) {
+    while ((left[a] && !digit(left[a])) || (right[b] && !digit(right[b]))) {
+      const result = compare(order(left[a]), order(right[b]));
+      if (result) return result;
+      a++;
+      b++;
+    }
+    const aStart = a, bStart = b;
+    while (digit(left[a])) a++;
+    while (digit(right[b])) b++;
+    const number = compare(BigInt(left.slice(aStart, a) || 0), BigInt(right.slice(bStart, b) || 0));
+    if (number) return number;
+  }
+  return 0;
+}
+
+function compareDebianVersions(installed, fixed) {
+  const left = debianVersionParts(installed), right = debianVersionParts(fixed);
+  if (!left || !right) return null;
+  return compare(left[0], right[0]) || compareDebianSegment(left[1], right[1]) || compareDebianSegment(left[2], right[2]);
+}
+
+function debianPackageCheck(item) {
+  const rows = item.debianPackages || [];
+  return `<details class="version-check">
+    <summary>Debian 패키지·백포트 대조</summary>
+    ${rows.length ? `<form data-debian-check>
+      <p class="version-hint">Debian 공식 패키지의 소스 이름과 소스 버전을 입력하세요. 자체 빌드와 타 배포판은 해당 공급사 공지를 확인하세요.</p>
+      <pre class="debian-command"><code>dpkg-query -W -f='\${source:Package} \${source:Version}\\n' 패키지명</code></pre>
+      <div class="version-fields">
+        <label>Debian 릴리스·소스 패키지<select name="debianPackage" required>
+          <option value="">선택해 주세요</option>
+          ${rows.map((row,index) => `<option value="${index}">${escape(debianSuites[row.suite] || row.suite)} · ${escape(row.package)}</option>`).join('')}
+        </select></label>
+        <label>Debian 설치 소스 버전<input name="debianVersion" required maxlength="150" spellcheck="false" autocomplete="off" placeholder="예: 1:3.2.1-1+deb12u1"></label>
+      </div>
+      <button type="submit" class="outline">Debian 버전 대조</button>
+      <div class="version-result" role="status" hidden></div>
+    </form>` : '<p class="version-hint">Debian 공식 데이터에서 릴리스별 수정 버전을 확인하지 못했습니다.</p>'}
+    <div class="version-sources">${link(debianRecordUrl(item), 'Debian Security Tracker 원문')}</div>
+  </details>`;
+}
+
+function showDebianVersionResult(form, item) {
+  const result = form.querySelector('.version-result');
+  const key = form.elements.debianPackage.value;
+  const entry = key ? item?.debianPackages?.[Number(key)] : null;
+  if (!entry) return;
+  const compared = compareDebianVersions(form.elements.debianVersion.value.trim(), entry.fixed);
+  const status = data.sources?.['Debian Security Tracker'];
+  const fresh = status?.state === 'ok';
+  const text = !fresh ? '이전 수집 자료 · Debian 원문에서 최신 수정 상태를 확인하세요.'
+    : compared === null ? '추가 확인 필요 · Debian 소스 패키지 버전 형식을 확인하세요.'
+    : compared >= 0 ? 'Debian 수정 패키지 버전 기준 충족' : 'Debian 수정 패키지보다 이전 버전';
+  result.innerHTML = `<strong>${text}</strong><p>공식 수정 버전 · ${escape(entry.fixed)}</p>
+    ${status?.at ? `<p>자료 확인 · ${escape(date(status.at))}</p>` : ''}
+    <p>${link(debianRecordUrl(item), '해당 CVE의 Debian 원문')}</p>`;
+  result.hidden = false;
+}
+
+const debianDialog = $('#debian-dialog');
+let debianLookupPromise;
+let debianLookupItem;
+
+$('#open-debian-lookup').addEventListener('click', () => debianDialog.showModal());
+$('#debian-lookup').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const input = event.target.elements.cve;
+  const id = input.value.trim().toUpperCase();
+  if (!/^CVE-\d{4}-\d{4,}$/.test(id)) return;
+  const status = debianDialog.querySelector('[data-debian-lookup-status]');
+  const output = debianDialog.querySelector('[data-debian-lookup-result]');
+  status.textContent = 'Debian 공식 수정 패키지 목록을 확인하고 있습니다.';
+  output.replaceChildren();
+  try {
+    debianLookupPromise ||= fetch('./debian-packages.json', {cache:'no-cache'}).then((response) => {
+      if (!response.ok) throw Error(`Debian index HTTP ${response.status}`);
+      return response.json();
+    }).catch((error) => {
+      debianLookupPromise = undefined;
+      throw error;
+    });
+    const lookup = await debianLookupPromise;
+    if (input.value.trim().toUpperCase() !== id) return;
+    debianLookupItem = {id, debianPackages:lookup[id] || []};
+    output.innerHTML = debianPackageCheck(debianLookupItem);
+    output.querySelector('details').open = true;
+    status.textContent = `${id} · 수정 패키지 기록 ${debianLookupItem.debianPackages.length}건`;
+  } catch {
+    if (input.value.trim().toUpperCase() !== id) return;
+    status.textContent = 'Debian 목록을 불러올 수 없습니다. 잠시 뒤 다시 조회하세요.';
+    output.innerHTML = link(debianRecordUrl({id}), 'Debian Security Tracker 원문');
+  }
+});
+debianDialog.addEventListener('submit', (event) => {
+  if (!event.target.matches('[data-debian-check]')) return;
+  event.preventDefault();
+  showDebianVersionResult(event.target, debianLookupItem);
+});
+
 function installedVersionCheck(item) {
   const products = item.cna?.affected || [];
   const cnaLink = link(`https://www.cve.org/CVERecord?id=${encodeURIComponent(item.id)}`, 'CNA 원문');
@@ -763,6 +884,7 @@ function renderInspector(panel = $('#inspector'), item = selected) {
     </div>
     ${actionSummary(item)}
     ${installedVersionCheck(item)}
+    ${debianPackageCheck(item)}
     <div class="review-control">
       <label>내 점검 상태 <select data-review-state aria-label="내 점검 상태">
         ${state === 'recheck' ? '<option value="recheck" selected disabled>재검토 필요</option>' : ''}
@@ -886,6 +1008,53 @@ function watchBriefing() {
   </section>`;
 }
 
+function myWorkRows(items, reviews, drafts, today) {
+  const byId = new Map(items.map((item) => [item.id, item]));
+  const ids = new Set([...Object.keys(reviews), ...drafts.keys()]);
+  return [...ids].flatMap((id) => {
+    const item = byId.get(id);
+    const draft = drafts.get(id);
+    const state = item ? reviewState(item) : reviews[id]?.state;
+    if (!draft && state !== 'investigate' && state !== 'recheck') return [];
+    const due = draft?.metadata?.dueDate || '';
+    const days = /^\d{4}-\d{2}-\d{2}$/.test(due) ? (Date.parse(due) - Date.parse(today)) / 86400000 : Infinity;
+    const changed = Boolean(item && draft?.baseline && (
+      draft.baseline.fingerprint !== remediationFingerprint(item) || remediationSinceReview(item, draft.baseline).length));
+    const urgency = days <= 0 ? 0 : changed || state === 'recheck' ? 1 : days <= 3 ? 2 : 3;
+    return [{id, item, draft, due, days, state, changed, urgency}];
+  }).sort((a,b) => a.urgency - b.urgency || (a.days - b.days || 0)
+    || (Date.parse(b.draft?.savedAt) || 0) - (Date.parse(a.draft?.savedAt) || 0) || a.id.localeCompare(b.id));
+}
+
+function myWork() {
+  const today = new Intl.DateTimeFormat('en-CA', {
+    timeZone:'Asia/Seoul',year:'numeric',month:'2-digit',day:'2-digit',
+  }).format(new Date());
+  const rows = myWorkRows(data.cves, preferences.reviews, storedAdvisoryDrafts(), today);
+  const render = ({id, item, draft, due, days, state, changed}) => {
+    const dateLabel = days < 0 ? '기한 지남' : days === 0 ? '오늘 마감' : '조치 기한';
+    return `<div class="my-work-row">
+      <div><small>${escape(id)}</small><strong>${escape(item?.titleKo || item?.title || draft?.title || id)}</strong>
+        <div class="watch-badges">
+          ${draft ? '<span class="pill">저장한 초안</span>' : ''}
+          ${state === 'investigate' || state === 'recheck' ? `<span class="pill review-${state}">${reviewLabels[state]}</span>` : ''}
+          ${changed ? '<span class="pill review-recheck">조치 정보 변경</span>' : ''}
+          ${due ? `<span class="pill ${days <= 3 ? 'review-recheck' : ''}">${dateLabel} · ${escape(due)}</span>` : ''}
+          ${!item ? '<span class="pill">현재 피드에 없음</span>' : ''}
+        </div></div>
+      <div class="actions">
+        ${draft ? `<button type="button" class="outline" data-open-draft="${escape(id)}">초안 이어 쓰기</button>` : ''}
+        ${item ? `<button type="button" class="outline" data-cve="${escape(id)}" ${state === 'recheck' ? 'data-open-review' : ''}>${state === 'recheck' ? '변경 확인' : 'CVE 열기'}</button>`
+          : link(cnaRecordUrl({id}), 'CVE 원문')}
+      </div>
+    </div>`;
+  };
+  return `<section class="digest digest-cve my-work"><header><h3>내 작업</h3>${rows.length ? `<span>${rows.length}건</span>` : ''}</header>
+    ${rows.length ? rows.slice(0, 6).map(render).join('') : '<p class="feed-note">저장한 공지 초안과 확인이 필요한 CVE가 여기에 표시됩니다.</p>'}
+    ${rows.length > 6 ? `<details><summary>나머지 ${rows.length - 6}건</summary>${rows.slice(6).map(render).join('')}</details>` : ''}
+  </section>`;
+}
+
 function renderOverview() {
   const sections = [
     ['issues', '핵심 이슈', data.news.filter((article) => article.kind === 'advisory' || article.cves.length)],
@@ -894,7 +1063,7 @@ function renderOverview() {
     ['dark', '다크웹 보도', data.news.filter((article) => article.dark)],
   ];
   const view = $('#overview');
-  view.innerHTML = watchBriefing() + overviewHistory() + sections.map(([target, title, articles]) => `
+  view.innerHTML = myWork() + watchBriefing() + overviewHistory() + sections.map(([target, title, articles]) => `
     <section class="digest">
       <header><h3>${title}</h3><button data-open="${target}">전체 보기 <span aria-hidden="true">→</span></button></header>
       ${articles.slice(0, 4).map((article) => newsArticle(article, 'h4')).join('') || '<p>수집된 항목 없음</p>'}
@@ -1255,7 +1424,8 @@ function advisoryText(item, {comparison, version, translations = new Map()} = {}
 const advisoryDialog = $('#advisory-dialog');
 let advisoryDraft;
 const draftMetadata = {internalImpact:'사내 영향 여부', dueDate:'조치 기한', owner:'담당 부서'};
-const advisoryStorageKey = (item) => `security-insight.advisory-draft.v1.${item.id}`;
+const advisoryStoragePrefix = 'security-insight.advisory-draft.v1.';
+const advisoryStorageKey = (item) => advisoryStoragePrefix + item.id;
 const draftField = (name) => advisoryDialog.querySelector(`[name="${name}"]`);
 const draftStatus = () => advisoryDialog.querySelector('[data-draft-status]');
 
@@ -1268,14 +1438,59 @@ function loadAdvisoryDraft(item) {
   }
 }
 
+function storedAdvisoryDrafts() {
+  const drafts = new Map();
+  try {
+    for (let index = 0; index < localStorage.length; index++) {
+      const key = localStorage.key(index);
+      if (!key?.startsWith(advisoryStoragePrefix)) continue;
+      const id = key.slice(advisoryStoragePrefix.length);
+      if (!/^CVE-\d{4}-\d{4,}$/.test(id)) continue;
+      const draft = loadAdvisoryDraft({id});
+      if (draft) drafts.set(id, draft);
+    }
+  } catch { /* Browser storage may be unavailable. */ }
+  return drafts;
+}
+
 function showAdvisoryDraftChanges() {
-  const {item, baseline} = advisoryDraft;
+  const {item, baseline, offline} = advisoryDraft;
   const area = advisoryDialog.querySelector('[data-advisory-draft-changes]');
+  if (offline) {
+    area.hidden = true;
+    return;
+  }
   const {rows, events} = remediationComparison(item, baseline);
   area.hidden = !rows.length && !events.length;
   const currentValues = rows.length ? changeDetails({changes:rows})
     : events.slice(0, 3).map((event) => changeDetails(event)).join('');
   area.querySelector('[data-advisory-change-values]').innerHTML = currentValues;
+}
+
+function advisoryPreflightWarnings(item, text, changed, offline) {
+  const warnings = [];
+  const sections = new Map([...text.matchAll(/^([1-5])\. [^\r\n]*\r?\n([\s\S]*?)(?=^[1-5]\. |^\[근거 링크\]|$(?![\s\S]))/gm)]
+    .map((match) => [match[1], match[2].trim()]));
+  const missing = ['1','2','3','4','5'].filter((number) => !sections.get(number));
+  if (missing.length) warnings.push(`본문이 비어 있거나 제목이 빠진 항목 · ${missing.join(', ')}번`);
+  const hasLink = (text) => (text?.match(/https?:\/\/[^\s<>]+/g) || []).some(publicUrl);
+  if (!hasLink(sections.get('3'))) warnings.push('영향 범위 항목에 근거 링크를 확인하고 추가하세요.');
+  if (!hasLink(sections.get('5'))) warnings.push('조치 방법 항목에 패치 또는 완화조치의 근거 링크를 추가하세요.');
+  if (!item.fixes?.length && !item.describedFixes?.length) warnings.push('수집 데이터에서 수정 버전이 확인되지 않았습니다. 벤더의 패치 공지를 확인하세요.');
+  if (changed) warnings.push('초안 기준 이후 패치 또는 완화 정보가 달라졌습니다. 변경 내용을 확인하고 본문을 갱신하세요.');
+  if (offline) warnings.push('현재 수집 목록에 없는 CVE입니다. 공식 원문에서 최신 조치 상태를 확인하세요.');
+  return warnings;
+}
+
+function renderAdvisoryPreflight() {
+  if (!advisoryDraft) return;
+  const changed = !advisoryDialog.querySelector('[data-advisory-draft-changes]').hidden;
+  const checks = advisoryPreflightWarnings(advisoryDraft.item, advisoryDialog.querySelector('textarea').value,
+    changed, advisoryDraft.offline);
+  advisoryDialog.querySelector('[data-advisory-preflight-count]').textContent = checks.length ? `· 확인 ${checks.length}건` : '· 추가 확인 항목 없음';
+  advisoryDialog.querySelector('[data-advisory-preflight]').innerHTML = checks.length
+    ? `<ul>${checks.map((message) => `<li>${escape(message)}</li>`).join('')}</ul>`
+    : '<p>본문 항목과 근거 링크가 있습니다. 발송 전 링크의 내용과 문안을 대조하세요.</p>';
 }
 
 function saveAdvisoryDraft(acknowledge = false) {
@@ -1284,6 +1499,7 @@ function saveAdvisoryDraft(acknowledge = false) {
   const baseline = acknowledge ? {reviewedThrough:advisoryDraft.asOf, fingerprint:remediationFingerprint(item)} : advisoryDraft.baseline;
   const saved = {
     body:advisoryDialog.querySelector('textarea').value, generated, baseline, savedAt:new Date().toISOString(),
+    title:item.titleKo || item.title,
     metadata:Object.fromEntries(Object.keys(draftMetadata).map((name) => [name, draftField(name).value])),
     comparison:draftField('comparison').checked ? comparison : null,
     version:draftField('version').checked ? version : '',
@@ -1295,19 +1511,21 @@ function saveAdvisoryDraft(acknowledge = false) {
     draftStatus().textContent = acknowledge ? '조치 정보 확인 기준을 갱신했습니다. 본문은 편집한 상태로 저장했습니다.'
       : '현재 브라우저에 초안을 저장했습니다.';
     showAdvisoryDraftChanges();
+    renderAdvisoryPreflight();
+    if (page === 'home') renderOverview();
   } catch {
     draftStatus().textContent = '이 브라우저에 초안을 저장하지 못했습니다. 공지문 복사나 HTML 다운로드를 이용하세요.';
   }
 }
 
-function openAdvisory(button, item) {
-  const panel = button.closest('.inspector');
-  const result = panel.querySelector('.version-result');
+function openAdvisory(button, item, offline = false) {
+  const result = button?.closest('.inspector')?.querySelector('[data-version-check] .version-result');
   const fields = result?.closest('form').elements;
   const summary = result && !result.hidden ? result.dataset.summary : '';
   const saved = loadAdvisoryDraft(item);
   advisoryDraft = {
     item,
+    offline,
     asOf:data.updatedAt,
     baseline: saved?.baseline?.fingerprint && completedRemediation(saved.baseline) ? saved.baseline
       : {reviewedThrough:data.updatedAt, fingerprint:remediationFingerprint(item)},
@@ -1323,23 +1541,28 @@ function openAdvisory(button, item) {
   for (const name of Object.keys(draftMetadata)) draftField(name).value = saved?.metadata?.[name] || '';
   advisoryDialog.querySelector('textarea').value = saved?.body || '';
   advisoryDialog.querySelector('.advisory-evidence').open = false;
-  advisoryDialog.querySelector('[data-advisory-evidence]').innerHTML = advisoryEvidence(item, advisoryDraft.translations);
+  advisoryDialog.querySelector('.advisory-preflight').open = false;
+  advisoryDialog.querySelector('[data-advisory-evidence]').innerHTML = offline
+    ? `<p>이 항목은 현재 수집 목록에서 빠져 있습니다. ${link(cnaRecordUrl(item), 'CVE 원문')}</p>`
+    : advisoryEvidence(item, advisoryDraft.translations);
   advisoryDialog.querySelector('[data-copy-fallback]').hidden = true;
   for (const key of ['comparison', 'version']) {
     const option = advisoryDialog.querySelector(`[name="${key}"]`);
     option.checked = Boolean(saved?.[key]);
-    option.closest('label').hidden = !advisoryDraft[key];
+    option.closest('label').hidden = offline || !advisoryDraft[key];
   }
   const translate = advisoryDialog.querySelector('[data-translate-advisory]');
-  translate.hidden = !('Translator' in globalThis) || advisoryTranslationSources(item, advisoryDraft.comparison)
+  translate.hidden = offline || !('Translator' in globalThis) || advisoryTranslationSources(item, advisoryDraft.comparison)
     .every((source) => advisoryDraft.translations.has(source));
   translate.disabled = false;
   advisoryDialog.querySelector('[data-translation-status]').textContent = '';
+  advisoryDialog.querySelector('[data-offline-draft]').hidden = !offline;
   draftStatus().textContent = saved ? `저장한 초안을 불러왔습니다${Number.isFinite(Date.parse(saved.savedAt)) ? ` · ${date(saved.savedAt)}` : ''}.` : '';
   advisoryDialog.querySelector('[data-remove-advisory]').hidden = !saved;
   if (!saved) updateAdvisory();
   else advisoryDialog.querySelector('[data-copy-status]').textContent = '';
   showAdvisoryDraftChanges();
+  renderAdvisoryPreflight();
   advisoryDialog.showModal();
 }
 
@@ -1371,6 +1594,7 @@ function updateAdvisory() {
   advisoryDraft.generated = generated;
   advisoryDialog.querySelector('[data-copy-status]').textContent = merged.preserved
     ? '직접 수정한 항목에는 자동 변경을 적용하지 않았습니다.' : '';
+  renderAdvisoryPreflight();
 }
 
 function currentAdvisoryText() {
@@ -1403,6 +1627,12 @@ function advisoryHtml(text) {
 }
 
 advisoryDialog.querySelector('.advisory-options').addEventListener('change', updateAdvisory);
+advisoryDialog.querySelector('#advisory-preview').addEventListener('input', renderAdvisoryPreflight);
+advisoryDialog.querySelector('[data-open-advisory-evidence]').addEventListener('click', () => {
+  const evidence = advisoryDialog.querySelector('.advisory-evidence');
+  evidence.open = true;
+  evidence.querySelector('summary').focus();
+});
 advisoryDialog.querySelector('[data-save-advisory]').addEventListener('click', () => saveAdvisoryDraft());
 advisoryDialog.querySelector('[data-remove-advisory]').addEventListener('click', (event) => {
   if (!advisoryDraft) return;
@@ -1410,6 +1640,7 @@ advisoryDialog.querySelector('[data-remove-advisory]').addEventListener('click',
     localStorage.removeItem(advisoryStorageKey(advisoryDraft.item));
     event.currentTarget.hidden = true;
     draftStatus().textContent = '저장본을 삭제했습니다. 열린 문안은 계속 편집할 수 있습니다.';
+    if (page === 'home') renderOverview();
   } catch {
     draftStatus().textContent = '이 브라우저에서 저장본을 삭제하지 못했습니다.';
   }
@@ -1487,9 +1718,18 @@ async function copyCveLink(button, item) {
   }
 }
 for (const panel of [$('#inspector'), $('#priority-inspector')]) {
-  panel.addEventListener('submit', (event) => showInstalledVersionResult(event,
-    panel.id === 'inspector' ? selected : priorities.find((item) => item.id === prioritySelection)));
+  panel.addEventListener('submit', (event) => {
+    const item = panel.id === 'inspector' ? selected : priorities.find((item) => item.id === prioritySelection);
+    if (event.target.matches('[data-debian-check]')) {
+      event.preventDefault();
+      showDebianVersionResult(event.target, item);
+    } else {
+      showInstalledVersionResult(event, item);
+    }
+  });
   panel.addEventListener('input', (event) => {
+    const debian = event.target.closest('[data-debian-check]');
+    if (debian) debian.querySelector('.version-result').hidden = true;
     const form = event.target.closest('[data-version-check]');
     if (!form || event.target.matches('[data-batch-filter]')) return;
     form.querySelector('.version-result').hidden = true;
@@ -1583,6 +1823,14 @@ $('#overview').addEventListener('submit', (event) => {
 });
 
 $('#overview').addEventListener('click', (event) => {
+  const edit = event.target.closest('[data-open-draft]');
+  if (edit) {
+    const id = edit.dataset.openDraft;
+    const item = data.cves.find((record) => record.id === id);
+    const saved = loadAdvisoryDraft({id});
+    if (saved) openAdvisory(null, item || {id,title:saved.title || id}, !item);
+    return;
+  }
   const remove = event.target.closest('[data-remove-watch]');
   if (remove) {
     preferences.products.splice(Number(remove.dataset.removeWatch), 1);
@@ -1605,7 +1853,16 @@ $('#overview').addEventListener('click', (event) => {
   const section = event.target.closest('[data-open]');
   if (section) showPage(section.dataset.open);
   const item = event.target.closest('[data-cve]');
-  if (item) openCve(item.dataset.cve);
+  if (item) {
+    openCve(item.dataset.cve);
+    if (item.hasAttribute('data-open-review')) {
+      const change = $('#inspector .review-comparison');
+      if (change) {
+        change.tabIndex = -1;
+        change.focus();
+      }
+    }
+  }
 });
 $('#priority-list').addEventListener('click', (event) => {
   const row = event.target.closest('.priority-row');
@@ -1746,6 +2003,7 @@ async function load(manual = false) {
     const currentSelection = selected?.id;
     const currentProduct = $('#product').value;
     data = snapshot;
+    debianLookupPromise = undefined;
     selected = data.cves.find((item) => item.id === currentSelection);
     priorities = [...data.cves].sort(comparePriority).slice(0, 3);
     const stamp = $('#freshness');

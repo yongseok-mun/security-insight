@@ -329,3 +329,26 @@ dialog code { overflow-wrap: anywhere; }
 }
 .advisory-actions { align-items:center; }
 .advisory-actions [role="status"] { color:var(--muted); font-size:12px; }
+
+.batch-toggle { display:flex; align-items:center; gap:7px; font-size:13px; }
+.batch-toggle input { accent-color:var(--pink); }
+.batch-results { overflow:auto; margin:9px 0; }
+.batch-results table { border-collapse:collapse; width:100%; text-align:left; }
+.batch-results :is(th,td) { padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+.batch-results tbody th { overflow-wrap:anywhere; }
+.batch-results td:nth-child(2) { min-width:112px; }
+.advisory-metadata { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; margin:9px 0 12px; }
+.advisory-metadata label { display:grid; gap:4px; font-size:12px; }
+.advisory-metadata :is(input,select), .version-fields textarea, [data-copy-fallback] {
+  width:100%;
+  min-width:0;
+  min-height:38px;
+  border:1px solid #404049;
+  border-radius:6px;
+  background:var(--surface);
+  color:var(--text);
+  font:inherit;
+  padding:6px 9px;
+}
+.version-fields textarea { resize:vertical; }
+@media(max-width:520px) { .advisory-metadata { grid-template-columns:1fr; } }

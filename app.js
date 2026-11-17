@@ -427,12 +427,14 @@ function installedVersionCheck(item) {
       ${products.length ? `
       <form data-version-check>
         <p class="version-hint">입력값은 이 화면에서만 사용합니다. 제품과 설치 버전은 공지에 쓰인 형식으로 입력하세요.</p>
+        <label class="batch-toggle"><input type="checkbox" name="batch"> 여러 버전 일괄 대조</label>
         <div class="version-fields">
           <label>공지 제품<select name="product" required>
             ${products.length > 1 ? '<option value="">제품·플랫폼 선택</option>' : ''}
             ${products.map((product, index) => `<option value="${index}">${escape(compareProductLabel(product, item.product))}</option>`).join('')}
           </select></label>
           <label>설치 버전<input name="version" required maxlength="100" placeholder="예: 3.4.1" spellcheck="false" autocomplete="off"></label>
+          <label hidden>설치 버전 목록<textarea name="versions" rows="4" maxlength="11000" placeholder="한 줄에 한 버전 또는 빌드, 최대 100줄" spellcheck="false" disabled></textarea></label>
           <label>설치 유형<select name="build">
             <option value="">선택해 주세요</option>
             <option value="upstream">공지 대상 제품의 릴리스</option>
@@ -451,37 +453,79 @@ function installedVersionCheck(item) {
     </details>`;
 }
 
+function installedVersionOutcome(product, version, build, conditions) {
+  const upstream = build === 'upstream';
+  const result = upstream ? evaluateInstalledVersion(product, version) : null;
+  let status = 'unknown';
+  let headline = '추가 확인 필요';
+  let explanation = '벤더 공지에서 제품 에디션·기능 설정과 영향 조건을 확인하세요.';
+  if (!upstream) {
+    explanation = '배포판·백포트·자체 빌드는 설치 패키지 릴리스와 해당 공급사의 보안 공지로 확인하세요.';
+    if (!build) explanation = '설치 유형을 선택하면 공지 범위와 대조할 수 있습니다.';
+  } else if (result.status === 'unaffected') {
+    status = 'unaffected';
+    headline = '공지상 해당 버전은 영향 없음';
+    explanation = '선택한 제품·플랫폼의 공지 범위를 기준으로 확인했습니다.';
+  } else if (result.status === 'affected' && conditions === 'met') {
+    status = 'affected';
+    headline = '공지상 영향 조건에 해당';
+    explanation = '확인한 조건과 설치 버전을 기준으로 패치 또는 완화조치를 검토하세요.';
+  } else if (result.status === 'affected' && conditions === 'not-met') {
+    explanation = '버전은 영향 범위에 해당합니다. 확인한 필수 조건과 다른 악용 경로가 있는지 공지에서 다시 대조하세요.';
+  }
+  return {status, headline, explanation, result};
+}
+
+const batchLabels = {affected:'영향 범위 해당', unaffected:'공지상 영향 없음', unknown:'추가 확인 필요'};
+
 function showInstalledVersionResult(event, item) {
   const form = event.target.closest('[data-version-check]');
   if (!form) return;
   event.preventDefault();
   const fields = form.elements;
   const product = item?.cna?.affected?.[Number(fields.product.value)];
-  const version = fields.version.value.trim();
-  if (!product || fields.product.value === '' || !version) return;
-  const upstream = fields.build.value === 'upstream';
-  const result = upstream ? evaluateInstalledVersion(product, version) : null;
+  if (!product || fields.product.value === '') return;
+  const batch = fields.batch.checked;
+  const versions = (batch ? fields.versions.value.split(/\r?\n/) : [fields.version.value])
+    .map((version) => version.trim()).filter(Boolean);
+  const output = form.querySelector('.version-result');
+  output.hidden = false;
+  delete output.dataset.summary;
+  if (!versions.length || versions.length > 100 || versions.some((version) => version.length > 100)) {
+    output.textContent = '설치 버전을 입력해 주세요. 최대 100줄까지, 한 줄에 100자 이내로 입력할 수 있습니다.';
+    return;
+  }
+  const results = [...new Set(versions)].map((version) => ({
+    version, ...installedVersionOutcome(product, version, fields.build.value, fields.conditions.value),
+  }));
   const conditionNotes = [
     product.platforms?.length ? `플랫폼 · ${product.platforms.join(', ')}` : '',
     product.modules?.length ? `구성요소 · ${product.modules.join(', ')}` : '',
     ...attackConditions(item),
   ].filter(Boolean);
   const fixes = [...new Set([...(item.fixes || []), ...(item.describedFixes || [])])];
-  let headline = '추가 확인 필요';
-  let explanation = '벤더 공지에서 제품 에디션·기능 설정과 영향 조건을 확인하세요.';
-  if (!upstream) {
-    explanation = '배포판·백포트·자체 빌드는 설치 패키지 릴리스와 해당 공급사의 보안 공지로 확인하세요.';
-    if (!fields.build.value) explanation = '설치 유형을 선택하면 공지 범위와 대조할 수 있습니다.';
-  } else if (result.status === 'unaffected') {
-    headline = '공지상 해당 버전은 영향 없음';
-    explanation = '선택한 제품·플랫폼의 공지 범위를 기준으로 확인했습니다.';
-  } else if (result.status === 'affected' && fields.conditions.value === 'met') {
-    headline = '공지상 영향 조건에 해당';
-    explanation = '확인한 조건과 설치 버전을 기준으로 패치 또는 완화조치를 검토하세요.';
-  } else if (result.status === 'affected' && fields.conditions.value === 'not-met') {
-    explanation = '버전은 영향 범위에 해당합니다. 확인한 필수 조건과 다른 악용 경로가 있는지 공지에서 다시 대조하세요.';
+  const fixNote = fixes.join(', ') || '확인된 수정 버전 없음 · 원문 공지 참조';
+  if (batch) {
+    const counts = Object.entries(batchLabels).map(([status, label]) =>
+      `${label} ${results.filter((entry) => entry.status === status).length}건`).join(' · ');
+    output.dataset.summary = [counts, ...results.map(({version, status}) => `${version} · ${batchLabels[status]}`),
+      `수정 정보 · ${fixNote}`].join('\n');
+    output.innerHTML = `<p>${escape(counts)}</p>
+      <label>결과 필터 <select data-batch-filter>
+        <option value="">전체</option><option value="review">영향 범위 해당 + 추가 확인 필요</option>
+        ${Object.entries(batchLabels).map(([status, label]) => `<option value="${status}">${label}</option>`).join('')}
+      </select></label>
+      <div class="batch-results"><table><thead><tr><th scope="col">설치 버전</th><th scope="col">대조 결과</th><th scope="col">판단 근거</th></tr></thead>
+      <tbody>${results.map(({version, status, result, explanation}) => `<tr data-version-status="${status}">
+        <th scope="row">${escape(version)}</th><td>${batchLabels[status]}</td>
+        <td>${escape(result?.reason || explanation)}</td></tr>`).join('')}</tbody></table></div>
+      <p data-batch-empty hidden>이 조건에 해당하는 버전이 없습니다.</p>
+      <p>수정 정보 · ${escape(fixNote)}</p>`;
+    return;
   }
-  const output = form.querySelector('.version-result');
+  const [{version, headline, explanation, result}] = results;
+  output.dataset.summary = [`입력 버전: ${version}`, headline, explanation, result && `버전 근거 · ${result.reason}`,
+    conditionNotes.length && `제품·CVSS 참고 조건 · ${conditionNotes.join(' / ')}`, `수정 정보 · ${fixNote}`].filter(Boolean).join('\n');
   output.innerHTML = `
     <strong>${headline}</strong><p>${explanation}</p>
     ${result ? `<p>버전 근거 · ${escape(result.reason)}</p>` : ''}
@@ -490,8 +534,7 @@ function showInstalledVersionResult(event, item) {
       <ul class="detail-list">${product.versions.map((entry) => `<li>${escape(versionLabel(entry))}</li>`).join('')}</ul>
     </details>` : ''}
     ${conditionNotes.length ? `<p>제품·CVSS 참고 조건 · ${escape(conditionNotes.join(' / '))}</p>` : ''}
-    <p>수정 정보 · ${escape(fixes.join(', ') || item.cna?.solutions?.[0] || '확인된 수정 버전 없음 · 원문 공지 참조')}</p>`;
-  output.hidden = false;
+    <p>수정 정보 · ${escape(fixNote)}</p>`;
 }
 
 function bilingual(item) {
@@ -1031,7 +1074,9 @@ function advisoryText(item, {comparison, version, translations = new Map()} = {}
   const title = item.titleKo || koreanText(item.title, translations) || [product, type].filter(Boolean).join(' ');
   const original = englishDescription(item);
   const description = item.descriptionKo || koreanText(original, translations);
-  const descriptionSource = item.descriptionKo ? item.translationSource : translations.has(original) ? '브라우저 기계 번역' : '';
+  const publishedTranslation = (item.advisoryKo || []).some(([source]) => source === original);
+  const descriptionSource = item.descriptionKo ? item.translationSource
+    : translations.has(original) ? (publishedTranslation ? '배포 전 기계 번역' : '브라우저 기계 번역') : '';
   const structuredOverview = product && types.length ? `${product}의 ${type}에 대한 공개 공지입니다.`
     : product ? `${product}에 영향을 주는 보안 취약점이 공개됐습니다.` : '공개된 보안 취약점입니다.';
   const localizedAction = (text) => koreanText(text, translations) || '수집한 원문 공지에서 세부 지침을 확인해 주세요.';
@@ -1081,6 +1126,10 @@ function advisoryText(item, {comparison, version, translations = new Map()} = {}
     `- NVD: ${nvd}`,
     ...(item.kev === true ? [`- CISA KEV: https://www.cisa.gov/known-exploited-vulnerabilities-catalog?search_api_fulltext=${encodeURIComponent(item.id)}`] : []),
     `- Security Insight 상세: ${cveUrl(item.id)}`,
+    ...(item.advisoryKo?.length ? [
+      '- 배포 전 기계 번역: Helsinki-NLP OPUS-MT (CC BY 4.0) https://huggingface.co/Helsinki-NLP/opus-mt-tc-big-en-ko',
+      '- 기계 번역된 설명과 조치 문장은 배포 전 벤더 원문과 대조해 주세요.',
+    ] : []),
   ].join('\n');
 }
 
@@ -1091,45 +1140,94 @@ function openAdvisory(button, item) {
   const panel = button.closest('.inspector');
   const result = panel.querySelector('.version-result');
   const fields = result?.closest('form').elements;
-  const reportedSolution = item.cna?.solutions?.[0];
-  const untranslatedSolution = containsKorean(reportedSolution) ? '' : reportedSolution;
+  const summary = result && !result.hidden ? result.dataset.summary : '';
   advisoryDraft = {
     item,
     comparison:reviewState(item) === 'recheck' ? remediationComparison(item, preferences.reviews[item.id]) : null,
-    translations:new Map(),
-    version:result && !result.hidden ? [
+    translations:new Map(item.advisoryKo || []),
+    version:summary ? [
       `대조 제품: ${fields.product.selectedOptions[0].textContent.trim()}`,
-      `입력 버전: ${fields.version.value.trim()}`,
       `설치 유형: ${fields.build.selectedOptions[0].textContent.trim()}`,
-      untranslatedSolution ? result.innerText.trim().replace(untranslatedSolution, '원문 공지의 해결책 확인')
-        : result.innerText.trim(),
+      summary,
     ].join('\n') : '',
   };
+  for (const field of advisoryDialog.querySelectorAll('.advisory-metadata [name]')) field.value = '';
+  advisoryDialog.querySelector('textarea').value = '';
+  advisoryDialog.querySelector('[data-copy-fallback]').hidden = true;
   for (const key of ['comparison', 'version']) {
     const option = advisoryDialog.querySelector(`[name="${key}"]`);
     option.checked = false;
     option.closest('label').hidden = !advisoryDraft[key];
   }
   const translate = advisoryDialog.querySelector('[data-translate-advisory]');
-  translate.hidden = !('Translator' in globalThis) || !advisoryTranslationSources(item, advisoryDraft.comparison).length;
+  translate.hidden = !('Translator' in globalThis) || advisoryTranslationSources(item, advisoryDraft.comparison)
+    .every((source) => advisoryDraft.translations.has(source));
   translate.disabled = false;
   advisoryDialog.querySelector('[data-translation-status]').textContent = '';
   updateAdvisory();
   advisoryDialog.showModal();
 }
 
+function mergeAdvisorySections(text, previous, generated) {
+  if (previous === undefined || text === previous) return {text:generated, preserved:false};
+  const split = (value) => value.split(/(?=^[1-5]\. |^\[근거 링크\])/m);
+  const current = split(text), old = split(previous), next = split(generated);
+  if (current.length !== old.length || next.length !== old.length) return {text,preserved:previous !== generated};
+  let preserved = false;
+  const updated = current.map((section, index) => {
+    if (section === old[index]) return next[index];
+    if (old[index] !== next[index]) preserved = true;
+    return section;
+  });
+  return {text:updated.join(''), preserved};
+}
+
 function updateAdvisory() {
   if (!advisoryDraft) return;
   const {item, comparison, version, translations} = advisoryDraft;
-  advisoryDialog.querySelector('textarea').value = advisoryText(item, {
+  const generated = advisoryText(item, {
     comparison:advisoryDialog.querySelector('[name="comparison"]').checked ? comparison : null,
     version:advisoryDialog.querySelector('[name="version"]').checked ? version : '',
     translations,
   });
-  advisoryDialog.querySelector('[data-copy-status]').textContent = '';
+  const preview = advisoryDialog.querySelector('textarea');
+  const merged = mergeAdvisorySections(preview.value, advisoryDraft.generated, generated);
+  preview.value = merged.text;
+  advisoryDraft.generated = generated;
+  advisoryDialog.querySelector('[data-copy-status]').textContent = merged.preserved
+    ? '직접 수정한 항목에는 자동 변경을 적용하지 않았습니다.' : '';
 }
 
-advisoryDialog.addEventListener('change', updateAdvisory);
+function currentAdvisoryText() {
+  const text = advisoryDialog.querySelector('textarea').value.trim();
+  const fields = [['internalImpact','사내 영향 여부'],['dueDate','조치 기한'],['owner','담당 부서']]
+    .flatMap(([name, label]) => {
+      const value = advisoryDialog.querySelector(`[name="${name}"]`).value.trim();
+      return value ? [`- ${label}: ${value}`] : [];
+    });
+  if (!fields.length) return text;
+  const [title, ...body] = text.split('\n');
+  return [title, ...fields, ...body].join('\n');
+}
+
+function advisoryHtml(text) {
+  const [title, ...lines] = text.split('\n');
+  const content = lines.filter((line) => line.trim()).map((line) => {
+    if (/^[1-5]\. |^\[.+\]$/.test(line)) {
+      return `<h2 style="font-size:17px;margin:22px 0 8px;color:#79344e">${escape(line)}</h2>`;
+    }
+    const match = line.match(/^(.*?)(https?:\/\/\S+)$/);
+    const address = match && publicUrl(match[2]);
+    const value = address ? `${escape(match[1])}<a href="${escape(address)}" style="color:#783750">${escape(address)}</a>` : escape(line);
+    return `<p style="margin:0 0 7px;line-height:1.6;overflow-wrap:anywhere">${value}</p>`;
+  }).join('\n');
+  return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>${escape(title)}</title></head>
+    <body style="margin:24px;color:#242129;background:#fff;font:14px 'Malgun Gothic',Arial,sans-serif">
+    <table width="100%" role="presentation" cellspacing="0" cellpadding="0"><tr><td>
+    <h1 style="font-size:23px;color:#242129;margin:0 0 14px">${escape(title)}</h1>${content}</td></tr></table></body></html>`;
+}
+
+advisoryDialog.querySelector('.advisory-options').addEventListener('change', updateAdvisory);
 advisoryDialog.addEventListener('close', () => { advisoryDraft = null; });
 advisoryDialog.querySelector('[data-translate-advisory]').addEventListener('click', async (event) => {
   const draft = advisoryDraft;
@@ -1150,7 +1248,7 @@ advisoryDialog.querySelector('[data-translate-advisory]').addEventListener('clic
     }
     if (advisoryDraft !== draft) return;
     updateAdvisory();
-    status.textContent = draft.translations.size === sources.length
+    status.textContent = sources.every((source) => draft.translations.has(source))
       ? '원문을 기계 번역했습니다. 버전과 조치 내용은 원문과 대조해 주세요.'
       : '일부 원문을 번역했습니다. 남은 지침은 원문에서 확인해 주세요.';
   } catch {
@@ -1163,16 +1261,25 @@ advisoryDialog.querySelector('[data-translate-advisory]').addEventListener('clic
   }
 });
 advisoryDialog.querySelector('[data-copy-advisory]').addEventListener('click', async () => {
-  const preview = advisoryDialog.querySelector('textarea');
+  const fallback = advisoryDialog.querySelector('[data-copy-fallback]');
   const status = advisoryDialog.querySelector('[data-copy-status]');
+  const text = currentAdvisoryText();
+  fallback.hidden = true;
   try {
-    await navigator.clipboard.writeText(preview.value);
+    await navigator.clipboard.writeText(text);
     status.textContent = '보안공지문을 복사했습니다.';
   } catch {
-    preview.focus();
-    preview.select();
+    fallback.value = text;
+    fallback.hidden = false;
+    fallback.focus();
+    fallback.select();
     status.textContent = '선택된 문안을 복사해 주세요.';
   }
+});
+advisoryDialog.querySelector('[data-export-advisory]').addEventListener('click', () => {
+  if (!advisoryDraft) return;
+  downloadBlob(new Blob([advisoryHtml(currentAdvisoryText())], {type:'text/html;charset=utf-8'}),
+    `${advisoryDraft.item.id}-security-advisory.html`);
 });
 
 async function copyCveLink(button, item) {
@@ -1196,7 +1303,28 @@ for (const panel of [$('#inspector'), $('#priority-inspector')]) {
     panel.id === 'inspector' ? selected : priorities.find((item) => item.id === prioritySelection)));
   panel.addEventListener('input', (event) => {
     const form = event.target.closest('[data-version-check]');
-    if (form) form.querySelector('.version-result').hidden = true;
+    if (!form || event.target.matches('[data-batch-filter]')) return;
+    form.querySelector('.version-result').hidden = true;
+    if (event.target === form.elements.batch) {
+      const batch = event.target.checked;
+      for (const [field, active] of [[form.elements.version, !batch], [form.elements.versions, batch]]) {
+        field.required = active;
+        field.disabled = !active;
+        field.closest('label').hidden = !active;
+      }
+    }
+  });
+  panel.addEventListener('change', (event) => {
+    if (!event.target.matches('[data-batch-filter]')) return;
+    const output = event.target.closest('.version-result');
+    const filter = event.target.value;
+    let visible = 0;
+    for (const row of output.querySelectorAll('[data-version-status]')) {
+      const status = row.dataset.versionStatus;
+      row.hidden = Boolean(filter) && (filter === 'review' ? status === 'unaffected' : filter !== status);
+      if (!row.hidden) visible++;
+    }
+    output.querySelector('[data-batch-empty]').hidden = visible > 0;
   });
 }
 
@@ -1352,6 +1480,15 @@ function base64(value) {
   return btoa(blocks.join(''));
 }
 
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+
 $('#email-form').addEventListener('submit', (event) => {
   event.preventDefault();
   const address = $('#email-address').value.trim();
@@ -1367,12 +1504,7 @@ $('#email-form').addEventListener('submit', (event) => {
       'Content-Transfer-Encoding: base64', '', wrapped(body), '']),
     `--${boundary}--`, '',
   ].join('\r\n');
-  const url = URL.createObjectURL(new Blob([message], {type:'message/rfc822'}));
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = 'security-insight.eml';
-  anchor.click();
-  setTimeout(() => URL.revokeObjectURL(url), 30000);
+  downloadBlob(new Blob([message], {type:'message/rfc822'}), 'security-insight.eml');
 });
 
 function showSourceStatus() {

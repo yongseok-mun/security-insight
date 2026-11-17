@@ -479,6 +479,8 @@ function installedVersionOutcome(product, version, build, conditions) {
 const batchLabels = {affected:'영향 범위 해당', unaffected:'공지상 영향 없음', unknown:'추가 확인 필요'};
 const cnaRecordUrl = (item) => `https://www.cve.org/CVERecord?id=${encodeURIComponent(item.id)}`;
 const nvdRecordUrl = (item) => `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(item.id)}`;
+const advisoryReferences = (item) => [...new Set([...(item.cna?.references || []), ...(item.references || [])]
+  .map(publicUrl).filter(Boolean))];
 
 function csvCell(value) {
   const text = String(value ?? '');
@@ -491,8 +493,8 @@ function downloadBatchCsv(button, item) {
   const product = item?.cna?.affected?.[Number(form.elements.product.value)];
   const rows = [...form.querySelectorAll('[data-version-status]:not([hidden])')];
   if (!product || !rows.length) return;
-  const vendors = (item.cna?.references || []).map(publicUrl).filter(Boolean);
-  const header = ['CVE', '제품', '설치 버전', '판정', '판정 근거', 'CNA 출처', '벤더 출처'];
+  const vendors = advisoryReferences(item);
+  const header = ['CVE', '제품', '설치 버전', '판정', '판정 근거', 'CNA 출처', '벤더 공지·패치 참고'];
   const body = rows.map((row) => [
     item.id, compareProductLabel(product, item.product), ...[...row.cells].map((cell) => cell.textContent.trim()),
     cnaRecordUrl(item), vendors.join(' '),
@@ -1108,7 +1110,7 @@ function advisoryEvidence(item, translations) {
   const nvd = link(nvdRecordUrl(item), 'NVD 레코드');
   const descriptionLink = item.descriptionEnSource === 'CNA' ? cna
     : item.descriptionEnSource === 'NVD' ? nvd : `${cna} ${nvd}`;
-  const vendors = [...new Set((item.cna?.references || []).map(publicUrl).filter(Boolean))]
+  const vendors = advisoryReferences(item)
     .map((url) => link(url, new URL(url).hostname)).join(' ');
   const ranges = (item.cna?.affected || []).map((product) => `<li><strong>${escape(compareProductLabel(product, item.product))}</strong>
     <ul>${(product.versions || []).map((entry) => `<li>${escape(versionLabel(entry))}</li>`).join('')}
@@ -1137,7 +1139,7 @@ function advisoryEvidence(item, translations) {
       ...workarounds.map((source) => pair('CNA 완화책',source,koreanText(source,translations),cna)),
       pair('CISA KEV 권고',requiredAction,koreanText(requiredAction,translations),
         link(`https://www.cisa.gov/known-exploited-vulnerabilities-catalog?search_api_fulltext=${encodeURIComponent(item.id)}`, 'CISA KEV 원문'))].join('')}
-    ${vendors ? `<p>벤더 공지 · ${vendors}</p>` : ''}`;
+    ${vendors ? `<p>벤더 공지·패치 참고 · ${vendors}</p>` : ''}`;
 }
 
 function advisoryText(item, {comparison, version, translations = new Map()} = {}) {
@@ -1161,7 +1163,7 @@ function advisoryText(item, {comparison, version, translations = new Map()} = {}
   const [fixes, solutions, workarounds, requiredAction] = remediationValues(item);
   const cna = cnaRecordUrl(item);
   const nvd = nvdRecordUrl(item);
-  const vendors = [...new Set((item.cna?.references || []).map(publicUrl).filter(Boolean))];
+  const vendors = advisoryReferences(item);
   const descriptionRefs = item.descriptionEnSource === 'CNA' ? [`- 설명에 명시된 수정 버전 근거(CNA): ${cna}`]
     : item.descriptionEnSource === 'NVD' ? [`- 설명에 명시된 수정 버전 근거(NVD): ${nvd}`]
       : [`- 설명에 명시된 수정 버전 확인(NVD): ${nvd}`, `- CNA 레코드: ${cna}`];
@@ -1238,7 +1240,7 @@ function advisoryText(item, {comparison, version, translations = new Map()} = {}
     ...changes,
     '',
     '[근거 링크]',
-    ...vendors.map((url) => `- 벤더 공지: ${url}`),
+    ...vendors.map((url) => `- 벤더 공지·패치 참고: ${url}`),
     `- CNA: ${cna}`,
     `- NVD: ${nvd}`,
     ...(item.kev === true ? [`- CISA KEV: https://www.cisa.gov/known-exploited-vulnerabilities-catalog?search_api_fulltext=${encodeURIComponent(item.id)}`] : []),

@@ -313,6 +313,8 @@ def enrich_cves(records, previous, translations):
             if item['title'] == item['id'] and item.get('cnaTitle'):
                 item['title'] = item['cnaTitle']
             english = item.get('descriptionEn') or item.get('cnaEnglish')
+            if not item.get('descriptionEn') and item.get('cnaEnglish'):
+                item['descriptionEnSource'] = 'CNA'
             korean = (item.get('descriptionKo') if item.get('translationSource') != '한국어 요약' else None) or item.get('cnaKorean')
             documented = translations.get(item['id'], {})
             if english and documented.get('sha256') != hashlib.sha256(english.encode('utf-8')).hexdigest():
@@ -354,6 +356,8 @@ def normalize(item, record, kev, probability, news):
                 epss=probability.get(cve_id), kev=cve_id in kev if kev else (True if item.get('kev') else None),
                 kevDate=kev_item.get('dateAdded') if kev_item else None,
                 descriptionEn=descriptions.get('en'), descriptionKo=descriptions.get('ko'),
+                descriptionEnSource='NVD' if descriptions.get('en') else None,
+                nvdConfigurations=record.get('configurations', []),
                 requiredAction=clean(kev_item.get('requiredAction')) if kev_item else None,
                 fixes=[clean(value) for value in item.get('fix', []) if isinstance(value, str)][:10],
                 references=list(dict.fromkeys(references))[:5], notices=notices[:3])
@@ -411,7 +415,7 @@ def merge_record(item, old, nvd, kev, probability, news, statuses):
         source = 'NVD · KEV 보강' if cve_id in statuses.get('nvdSupplementIds', ()) else 'NVD'
         stamps['NVD'] = statuses[source]['at']
     elif old.get('nvd'):
-        for key in ('nvd', 'nvdStatus', 'references', 'descriptionEn'):
+        for key in ('nvd', 'nvdStatus', 'references', 'descriptionEn', 'descriptionEnSource', 'nvdConfigurations'):
             current[key] = old.get(key)
         current['descriptionKo'] = old.get('descriptionKo') if old.get('translationSource') == '공식 레코드' else None
     if current['cvss'] is None or (not nvd_record and old.get('cvssSource') not in (None, 'cve.now')):

@@ -477,6 +477,29 @@ function installedVersionOutcome(product, version, build, conditions) {
 }
 
 const batchLabels = {affected:'영향 범위 해당', unaffected:'공지상 영향 없음', unknown:'추가 확인 필요'};
+const cnaRecordUrl = (item) => `https://www.cve.org/CVERecord?id=${encodeURIComponent(item.id)}`;
+const nvdRecordUrl = (item) => `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(item.id)}`;
+
+function csvCell(value) {
+  const text = String(value ?? '');
+  const safe = /^[\s\uFEFF]*[=+@-]|^[\t\r\n]/.test(text) ? "'" + text : text;
+  return '"' + safe.replace(/"/g, '""') + '"';
+}
+
+function downloadBatchCsv(button, item) {
+  const form = button.closest('[data-version-check]');
+  const product = item?.cna?.affected?.[Number(form.elements.product.value)];
+  const rows = [...form.querySelectorAll('[data-version-status]:not([hidden])')];
+  if (!product || !rows.length) return;
+  const vendors = (item.cna?.references || []).map(publicUrl).filter(Boolean);
+  const header = ['CVE', '제품', '설치 버전', '판정', '판정 근거', 'CNA 출처', '벤더 출처'];
+  const body = rows.map((row) => [
+    item.id, compareProductLabel(product, item.product), ...[...row.cells].map((cell) => cell.textContent.trim()),
+    cnaRecordUrl(item), vendors.join(' '),
+  ]);
+  const csv = '\uFEFF' + [header, ...body].map((row) => row.map(csvCell).join(',')).join('\r\n') + '\r\n';
+  downloadBlob(new Blob([csv], {type:'text/csv;charset=utf-8'}), `${item.id}-version-check.csv`);
+}
 
 function showInstalledVersionResult(event, item) {
   const form = event.target.closest('[data-version-check]');
@@ -515,6 +538,7 @@ function showInstalledVersionResult(event, item) {
         <option value="">전체</option><option value="review">영향 범위 해당 + 추가 확인 필요</option>
         ${Object.entries(batchLabels).map(([status, label]) => `<option value="${status}">${label}</option>`).join('')}
       </select></label>
+      <button type="button" class="outline" data-export-batch>현재 결과 CSV 다운로드</button>
       <div class="batch-results"><table><thead><tr><th scope="col">설치 버전</th><th scope="col">대조 결과</th><th scope="col">판단 근거</th></tr></thead>
       <tbody>${results.map(({version, status, result, explanation}) => `<tr data-version-status="${status}">
         <th scope="row">${escape(version)}</th><td>${batchLabels[status]}</td>
@@ -999,6 +1023,8 @@ function detailsAction(event, item) {
   if (copy) copyCveLink(copy, item);
   const advisory = event.target.closest('[data-generate-advisory]');
   if (advisory) openAdvisory(advisory, item);
+  const batch = event.target.closest('[data-export-batch]');
+  if (batch) downloadBatchCsv(batch, item);
 }
 
 const advisoryTypes = [
@@ -1057,6 +1083,63 @@ function advisoryTranslationSources(item, comparison) {
   ])].filter((text) => text && text !== item.id && !containsKorean(text));
 }
 
+function nvdConfigurationEvidence(configurations) {
+  if (!configurations?.length) return '<p>수집된 NVD CPE 범위가 없습니다.</p>';
+  const render = (node) => {
+    const matches = (node.cpeMatch || []).map((entry) => {
+      const bounds = [
+        ['versionStartIncluding','이상'], ['versionStartExcluding','초과'],
+        ['versionEndIncluding','이하'], ['versionEndExcluding','미만'],
+      ].flatMap(([key, label]) => entry[key] ? [`${entry[key]} ${label}`] : []);
+      const type = entry.vulnerable === true ? '취약 대상 CPE' : '환경 조건 CPE';
+      return `<li>${type}${bounds.length ? ` · ${escape(bounds.join(' / '))}` : ''}
+        <code>${escape(entry.criteria)}</code></li>`;
+    });
+    const children = (node.nodes || node.children || []).map(render);
+    const operator = {AND:'모두 충족', OR:'하나 이상 충족'}[node.operator];
+    const logic = [operator, node.negate ? '조건 부정' : ''].filter(Boolean).join(' · ');
+    return `<li>${logic ? `<strong>${escape(logic)}</strong>` : ''}<ul>${[...matches, ...children].join('')}</ul></li>`;
+  };
+  return `<ul class="nvd-configurations">${configurations.map(render).join('')}</ul>`;
+}
+
+function advisoryEvidence(item, translations) {
+  const cna = link(cnaRecordUrl(item), 'CNA 레코드');
+  const nvd = link(nvdRecordUrl(item), 'NVD 레코드');
+  const descriptionLink = item.descriptionEnSource === 'CNA' ? cna
+    : item.descriptionEnSource === 'NVD' ? nvd : `${cna} ${nvd}`;
+  const vendors = [...new Set((item.cna?.references || []).map(publicUrl).filter(Boolean))]
+    .map((url) => link(url, new URL(url).hostname)).join(' ');
+  const ranges = (item.cna?.affected || []).map((product) => `<li><strong>${escape(compareProductLabel(product, item.product))}</strong>
+    <ul>${(product.versions || []).map((entry) => `<li>${escape(versionLabel(entry))}</li>`).join('')}
+    <li>목록 외 버전 · ${escape(versionStates[product.defaultStatus] || '영향 여부 미확인')}</li></ul></li>`).join('');
+  const pair = (label, source, korean, sourceLink) => source ? `<details>
+    <summary>${escape(label)} · 원문 대조</summary>
+    <div class="evidence-columns"><div><strong>한국어</strong><p>${escape(korean || '수집된 한국어 문장 없음')}</p></div>
+    <div><strong>수집 원문</strong><p>${escape(source)}</p></div></div>
+    ${sourceLink}</details>` : '';
+  const [, solutions, workarounds, requiredAction] = remediationValues(item);
+  const overview = englishDescription(item);
+  return `
+    ${pair('취약점 설명', overview, item.descriptionKo || koreanText(overview, translations), descriptionLink)}
+    <h3>영향 버전 및 조건</h3>
+    <div class="evidence-columns">
+      <div><strong>CNA ${cna}</strong>${ranges ? `<ul>${ranges}</ul>` : '<p>수집된 구조화 범위 없음</p>'}${vendors}</div>
+      <div><strong>NVD ${nvd}</strong>${nvdConfigurationEvidence(item.nvdConfigurations)}</div>
+    </div>
+    <p class="feed-note">CNA의 제품 범위와 NVD의 CPE 적용 조건을 각각 표시합니다. 제품·플랫폼이 같은지 확인한 뒤 범위를 비교하세요.</p>
+    <h3>패치 버전</h3>
+    ${item.fixes?.length ? `<p>cve.now 수정 정보 · ${escape(item.fixes.join(', '))} ${link(item.url, 'cve.now')}</p>` : ''}
+    ${item.describedFixes?.length ? `<p>수집 설명에서 추출 · ${escape(item.describedFixes.join(', '))} ${descriptionLink}</p>` : ''}
+    ${!item.fixes?.length && !item.describedFixes?.length ? `<p>구조화된 패치 버전 미확인 · ${cna}</p>` : ''}
+    <h3>해결책·완화조치</h3>
+    ${[...solutions.map((source) => pair('CNA 해결책',source,koreanText(source,translations),cna)),
+      ...workarounds.map((source) => pair('CNA 완화책',source,koreanText(source,translations),cna)),
+      pair('CISA KEV 권고',requiredAction,koreanText(requiredAction,translations),
+        link(`https://www.cisa.gov/known-exploited-vulnerabilities-catalog?search_api_fulltext=${encodeURIComponent(item.id)}`, 'CISA KEV 원문'))].join('')}
+    ${vendors ? `<p>벤더 공지 · ${vendors}</p>` : ''}`;
+}
+
 function advisoryText(item, {comparison, version, translations = new Map()} = {}) {
   const affected = item.cna?.affected || [];
   const scope = affected.flatMap((product) => [
@@ -1076,9 +1159,12 @@ function advisoryText(item, {comparison, version, translations = new Map()} = {}
   const subsequentImpacts = impacts('S');
   const networkPath = metrics.AV === 'N' || metrics.AV === 'A';
   const [fixes, solutions, workarounds, requiredAction] = remediationValues(item);
-  const cna = `https://www.cve.org/CVERecord?id=${encodeURIComponent(item.id)}`;
-  const nvd = `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(item.id)}`;
+  const cna = cnaRecordUrl(item);
+  const nvd = nvdRecordUrl(item);
   const vendors = [...new Set((item.cna?.references || []).map(publicUrl).filter(Boolean))];
+  const descriptionRefs = item.descriptionEnSource === 'CNA' ? [`- 설명에 명시된 수정 버전 근거(CNA): ${cna}`]
+    : item.descriptionEnSource === 'NVD' ? [`- 설명에 명시된 수정 버전 근거(NVD): ${nvd}`]
+      : [`- 설명에 명시된 수정 버전 확인(NVD): ${nvd}`, `- CNA 레코드: ${cna}`];
   const changes = [];
   if (comparison) {
     const {completed, events, rows} = comparison;
@@ -1123,6 +1209,8 @@ function advisoryText(item, {comparison, version, translations = new Map()} = {}
     '',
     '3. 영향 범위(버전 및 전제조건)',
     ...(scope.length ? scope : [`- 제품: ${item.product || '미확인'} · 구조화된 영향 버전 미확인`]),
+    `- 영향 범위 근거(CNA): ${cna}`,
+    ...(item.nvdConfigurations?.length ? [`- NVD 적용 범위(CPE): ${nvd}`] : []),
     ...(conditions.length ? [`- 악용 조건(CVSS): ${conditions.join(' / ')}`] : []),
     '- 제품별 기능 활성화·배포 형태 등 세부 전제조건은 벤더 공지에서 확인해 주세요.',
     '',
@@ -1136,9 +1224,12 @@ function advisoryText(item, {comparison, version, translations = new Map()} = {}
     '5. 조치 방법(패치·완화·보안장비·접근제어)',
     `- 패치: ${fixes.length ? `수집된 수정 버전 ${fixes.join(', ')}. 대상 릴리스의 수정 버전을 벤더 공지에서 확인 후 적용합니다.`
       : '대상 릴리스의 수정 버전과 적용 절차를 벤더 공지에서 확인합니다.'}`,
+    ...(item.fixes?.length && publicUrl(item.url) ? [`- 패치 버전 참고(cve.now): ${publicUrl(item.url)}`] : []),
+    ...(item.describedFixes?.length ? descriptionRefs : []),
     ...[...new Set(solutions.map(localizedAction))].map((solution) => `  CNA 해결책: ${solution}`),
     ...(workarounds.length ? [...new Set(workarounds.map(localizedAction))].map((workaround) => `- 임시 완화(CNA): ${workaround}`)
       : ['- 임시 완화: 수집된 CNA 권고가 없습니다. 즉시 패치가 어려우면 벤더가 안내한 우회책의 적용 가능 여부를 확인합니다.']),
+    ...(solutions.length || workarounds.length ? [`- 해결책·완화조치 근거(CNA): ${cna}`] : []),
     ...(requiredAction ? [`- CISA KEV 조치 권고: ${localizedAction(requiredAction)}`] : []),
     '- 보안장비 정책(보완 통제): 영향 트래픽이 장비를 통과하고 해당 CVE의 벤더 검증 규칙이 있는 경우, 정상 업무 트래픽의 오탐을 확인한 뒤 WAF·IPS 정책 적용을 검토합니다.',
     networkPath ? '- 접근제어: 영향 인터페이스에 불필요한 접근을 차단하고 필요한 출발지·네트워크만 허용합니다.'
@@ -1161,28 +1252,80 @@ function advisoryText(item, {comparison, version, translations = new Map()} = {}
 
 const advisoryDialog = $('#advisory-dialog');
 let advisoryDraft;
+const draftMetadata = {internalImpact:'사내 영향 여부', dueDate:'조치 기한', owner:'담당 부서'};
+const advisoryStorageKey = (item) => `security-insight.advisory-draft.v1.${item.id}`;
+const draftField = (name) => advisoryDialog.querySelector(`[name="${name}"]`);
+const draftStatus = () => advisoryDialog.querySelector('[data-draft-status]');
+
+function loadAdvisoryDraft(item) {
+  try {
+    const saved = JSON.parse(localStorage.getItem(advisoryStorageKey(item)));
+    return typeof saved?.body === 'string' && typeof saved?.generated === 'string' ? saved : null;
+  } catch {
+    return null;
+  }
+}
+
+function showAdvisoryDraftChanges() {
+  const {item, baseline} = advisoryDraft;
+  const area = advisoryDialog.querySelector('[data-advisory-draft-changes]');
+  const {rows, events} = remediationComparison(item, baseline);
+  area.hidden = !rows.length && !events.length;
+  const currentValues = rows.length ? changeDetails({changes:rows})
+    : events.slice(0, 3).map((event) => changeDetails(event)).join('');
+  area.querySelector('[data-advisory-change-values]').innerHTML = currentValues;
+}
+
+function saveAdvisoryDraft(acknowledge = false) {
+  if (!advisoryDraft) return;
+  const {item, generated, comparison, version} = advisoryDraft;
+  const baseline = acknowledge ? {reviewedThrough:advisoryDraft.asOf, fingerprint:remediationFingerprint(item)} : advisoryDraft.baseline;
+  const saved = {
+    body:advisoryDialog.querySelector('textarea').value, generated, baseline, savedAt:new Date().toISOString(),
+    metadata:Object.fromEntries(Object.keys(draftMetadata).map((name) => [name, draftField(name).value])),
+    comparison:draftField('comparison').checked ? comparison : null,
+    version:draftField('version').checked ? version : '',
+  };
+  try {
+    localStorage.setItem(advisoryStorageKey(item), JSON.stringify(saved));
+    advisoryDraft.baseline = baseline;
+    advisoryDialog.querySelector('[data-remove-advisory]').hidden = false;
+    draftStatus().textContent = acknowledge ? '조치 정보 확인 기준을 갱신했습니다. 본문은 편집한 상태로 저장했습니다.'
+      : '현재 브라우저에 초안을 저장했습니다.';
+    showAdvisoryDraftChanges();
+  } catch {
+    draftStatus().textContent = '이 브라우저에 초안을 저장하지 못했습니다. 공지문 복사나 HTML 다운로드를 이용하세요.';
+  }
+}
 
 function openAdvisory(button, item) {
   const panel = button.closest('.inspector');
   const result = panel.querySelector('.version-result');
   const fields = result?.closest('form').elements;
   const summary = result && !result.hidden ? result.dataset.summary : '';
+  const saved = loadAdvisoryDraft(item);
   advisoryDraft = {
     item,
-    comparison:reviewState(item) === 'recheck' ? remediationComparison(item, preferences.reviews[item.id]) : null,
+    asOf:data.updatedAt,
+    baseline: saved?.baseline?.fingerprint && completedRemediation(saved.baseline) ? saved.baseline
+      : {reviewedThrough:data.updatedAt, fingerprint:remediationFingerprint(item)},
+    generated:saved?.generated,
+    comparison:saved?.comparison || (reviewState(item) === 'recheck' ? remediationComparison(item, preferences.reviews[item.id]) : null),
     translations:new Map(publishedAdvisoryTranslations(item)),
-    version:summary ? [
+    version:saved?.version || (summary ? [
       `대조 제품: ${fields.product.selectedOptions[0].textContent.trim()}`,
       `설치 유형: ${fields.build.selectedOptions[0].textContent.trim()}`,
       summary,
-    ].join('\n') : '',
+    ].join('\n') : ''),
   };
-  for (const field of advisoryDialog.querySelectorAll('.advisory-metadata [name]')) field.value = '';
-  advisoryDialog.querySelector('textarea').value = '';
+  for (const name of Object.keys(draftMetadata)) draftField(name).value = saved?.metadata?.[name] || '';
+  advisoryDialog.querySelector('textarea').value = saved?.body || '';
+  advisoryDialog.querySelector('.advisory-evidence').open = false;
+  advisoryDialog.querySelector('[data-advisory-evidence]').innerHTML = advisoryEvidence(item, advisoryDraft.translations);
   advisoryDialog.querySelector('[data-copy-fallback]').hidden = true;
   for (const key of ['comparison', 'version']) {
     const option = advisoryDialog.querySelector(`[name="${key}"]`);
-    option.checked = false;
+    option.checked = Boolean(saved?.[key]);
     option.closest('label').hidden = !advisoryDraft[key];
   }
   const translate = advisoryDialog.querySelector('[data-translate-advisory]');
@@ -1190,7 +1333,11 @@ function openAdvisory(button, item) {
     .every((source) => advisoryDraft.translations.has(source));
   translate.disabled = false;
   advisoryDialog.querySelector('[data-translation-status]').textContent = '';
-  updateAdvisory();
+  draftStatus().textContent = saved ? `저장한 초안을 불러왔습니다${Number.isFinite(Date.parse(saved.savedAt)) ? ` · ${date(saved.savedAt)}` : ''}.` : '';
+  advisoryDialog.querySelector('[data-remove-advisory]').hidden = !saved;
+  if (!saved) updateAdvisory();
+  else advisoryDialog.querySelector('[data-copy-status]').textContent = '';
+  showAdvisoryDraftChanges();
   advisoryDialog.showModal();
 }
 
@@ -1226,9 +1373,9 @@ function updateAdvisory() {
 
 function currentAdvisoryText() {
   const text = advisoryDialog.querySelector('textarea').value.trim();
-  const fields = [['internalImpact','사내 영향 여부'],['dueDate','조치 기한'],['owner','담당 부서']]
+  const fields = Object.entries(draftMetadata)
     .flatMap(([name, label]) => {
-      const value = advisoryDialog.querySelector(`[name="${name}"]`).value.trim();
+      const value = draftField(name).value.trim();
       return value ? [`- ${label}: ${value}`] : [];
     });
   if (!fields.length) return text;
@@ -1254,6 +1401,18 @@ function advisoryHtml(text) {
 }
 
 advisoryDialog.querySelector('.advisory-options').addEventListener('change', updateAdvisory);
+advisoryDialog.querySelector('[data-save-advisory]').addEventListener('click', () => saveAdvisoryDraft());
+advisoryDialog.querySelector('[data-remove-advisory]').addEventListener('click', (event) => {
+  if (!advisoryDraft) return;
+  try {
+    localStorage.removeItem(advisoryStorageKey(advisoryDraft.item));
+    event.currentTarget.hidden = true;
+    draftStatus().textContent = '저장본을 삭제했습니다. 열린 문안은 계속 편집할 수 있습니다.';
+  } catch {
+    draftStatus().textContent = '이 브라우저에서 저장본을 삭제하지 못했습니다.';
+  }
+});
+advisoryDialog.querySelector('[data-acknowledge-advisory]').addEventListener('click', () => saveAdvisoryDraft(true));
 advisoryDialog.addEventListener('close', () => { advisoryDraft = null; });
 advisoryDialog.querySelector('[data-translate-advisory]').addEventListener('click', async (event) => {
   const draft = advisoryDraft;
@@ -1274,6 +1433,7 @@ advisoryDialog.querySelector('[data-translate-advisory]').addEventListener('clic
     }
     if (advisoryDraft !== draft) return;
     updateAdvisory();
+    advisoryDialog.querySelector('[data-advisory-evidence]').innerHTML = advisoryEvidence(draft.item, draft.translations);
     status.textContent = sources.every((source) => draft.translations.has(source))
       ? '원문을 기계 번역했습니다. 버전과 조치 내용은 원문과 대조해 주세요.'
       : '일부 원문을 번역했습니다. 남은 지침은 원문에서 확인해 주세요.';
@@ -1351,6 +1511,7 @@ for (const panel of [$('#inspector'), $('#priority-inspector')]) {
       if (!row.hidden) visible++;
     }
     output.querySelector('[data-batch-empty]').hidden = visible > 0;
+    output.querySelector('[data-export-batch]').disabled = visible === 0;
   });
 }
 

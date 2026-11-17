@@ -352,3 +352,22 @@ dialog code { overflow-wrap: anywhere; }
 }
 .version-fields textarea { resize:vertical; }
 @media(max-width:520px) { .advisory-metadata { grid-template-columns:1fr; } }
+
+.advisory-evidence, .advisory-draft-changes {
+  margin:10px 0;
+  padding:9px 11px;
+  border:1px solid #51414f;
+  border-radius:5px;
+  background:var(--background);
+}
+.advisory-evidence summary { font-weight:650; }
+.advisory-evidence h3 { margin:12px 0 5px; }
+.advisory-evidence details { margin:7px 0; }
+.evidence-columns { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; margin:6px 0; }
+.evidence-columns > div { border:1px solid var(--line); padding:7px 9px; overflow-wrap:anywhere; min-width:0; }
+.evidence-columns p { margin:4px 0 1px; }
+.evidence-columns ul { padding-inline-start:16px; }
+.nvd-configurations code { display:block; font-size:11px; overflow-wrap:anywhere; }
+.advisory-draft-changes { border-color:#855529; }
+[data-export-batch]:disabled { opacity:.5; cursor:default; }
+@media(max-width:520px) { .evidence-columns { grid-template-columns:1fr; } }

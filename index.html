@@ -5,12 +5,12 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="description" content="CVE 우선순위, 영향 범위, 안전한 점검과 출처를 한 화면에서 확인하는 보안 인텔리전스 대시보드">
 <title>Security Insight</title>
-<link rel="stylesheet" href="style.css?v=work-share-30">
+<link rel="stylesheet" href="style.css?v=asset-csv-31">
 <style>
   .brand-text { display: flex; flex-direction: column; line-height: 1.3; }
   .brand-text small { color: var(--muted); font-size: 11px; font-weight: 500; }
 </style>
-<script src="app.js?v=work-share-30" defer></script>
+<script src="app.js?v=asset-csv-31" defer></script>
 </head>
 <body>
 <header class="site-header"><div class="header-content">
@@ -136,6 +136,58 @@
     <span role="status" data-draft-status></span>
   </div>
   <textarea data-copy-fallback aria-label="복사할 최종 공지문" rows="5" readonly hidden></textarea>
+</dialog>
+<dialog id="asset-dialog" aria-labelledby="asset-title">
+  <form method="dialog" class="close"><button aria-label="닫기">×</button></form>
+  <p data-pending-update class="pending-update" role="status" hidden>새 데이터가 준비됐습니다. 이 창을 닫은 뒤 상단에서 반영할 수 있습니다.</p>
+  <h2 id="asset-title">자산 CSV 대조</h2>
+  <p id="asset-cve" class="eyebrow"></p>
+  <p class="feed-note">파일과 판정 결과는 브라우저에서만 처리하며, 창을 닫으면 초기화됩니다. 헤더가 있는 파일을 사용하세요. 최대 2MB, 자산 5,000행까지 지원합니다.</p>
+  <form id="asset-form">
+    <label for="asset-file">자산 CSV 파일</label>
+    <input type="file" id="asset-file" accept=".csv,text/csv">
+    <fieldset id="asset-fields" hidden>
+      <legend>CSV 열 연결</legend>
+      <div class="version-fields">
+        <label>자산 ID 열<select name="assetId"></select></label>
+        <label>설치 버전 열<select name="version" required></select></label>
+        <label>제품 열<select name="product"></select></label>
+        <label>파일 전체의 공지 제품<select name="singleProduct"></select></label>
+        <label>외부 노출 열<select name="exposure"></select></label>
+        <label>설치 유형 열<select name="build"></select></label>
+        <label>파일 전체의 설치 유형<select name="defaultBuild">
+          <option value="">확인 전</option><option value="upstream">공지 대상 제품 릴리스</option>
+          <option value="downstream">배포판 패키지·백포트·자체 빌드</option>
+        </select></label>
+        <label>공지의 영향 조건 열<select name="conditions"></select></label>
+      </div>
+      <p class="feed-note">제품 열에 공지 제품명이 정확히 하나만 일치하는 행을 자동 대조합니다. 한 제품만 담긴 파일은 파일 전체의 공지 제품을 직접 선택할 수 있습니다.</p>
+      <details><summary>외부 노출·설치 유형·영향 조건에 쓸 수 있는 값</summary>
+        <ul>
+          <li>외부 노출 · 예/아니오, Y/N, 외부 노출/내부 전용, true/false</li>
+          <li>설치 유형 · upstream/downstream, 공지 대상 제품 릴리스/배포판 패키지</li>
+          <li>영향 조건 · met/not-met, 해당/미해당. 공지에 명시된 조건을 확인한 행에만 입력하세요.</li>
+        </ul>
+      </details>
+      <button class="utility" type="submit">자산 대조 실행</button>
+    </fieldset>
+  </form>
+  <p id="asset-status" class="feed-note" role="status"></p>
+  <section id="asset-results" aria-labelledby="asset-results-title" hidden>
+    <h3 id="asset-results-title">자산별 대조 결과</h3>
+    <p id="asset-totals" class="feed-note"></p>
+    <div class="actions asset-filters">
+      <label>결과 보기 <select id="asset-result-filter"></select></label>
+      <label><input type="checkbox" id="asset-external-only"> 외부 노출만</label>
+      <button class="outline" type="button" id="asset-download">필터 결과 CSV 다운로드</button>
+    </div>
+    <div id="asset-table"></div>
+    <div class="actions asset-pager">
+      <button class="outline" type="button" id="asset-previous">이전</button>
+      <span id="asset-page" role="status"></span>
+      <button class="outline" type="button" id="asset-next">다음</button>
+    </div>
+  </section>
 </dialog>
 <dialog id="email-dialog" aria-labelledby="email-title">
   <form method="dialog" class="close"><button aria-label="닫기">×</button></form>

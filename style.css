@@ -406,3 +406,15 @@ dialog code { overflow-wrap: anywhere; }
 #cve-mail-options { min-inline-size:0; margin:0 0 10px; padding:6px 10px; border:1px solid var(--line); border-radius:5px; }
 #cve-mail-options label { display:inline-flex; align-items:center; gap:4px; min-height:32px; margin-inline-end:10px; }
 #cve-mail-options .feed-note { margin:3px 0; }
+
+#asset-dialog { width:min(960px, calc(100% - 24px)); max-height:calc(100dvh - 24px); }
+#asset-title { margin:0 25px 6px 0; }
+#asset-file { display:block; max-width:100%; margin:6px 0 12px; }
+#asset-fields { min-inline-size:0; margin:0; border:1px solid var(--line); border-radius:5px; }
+#asset-fields details { margin:8px 0; }
+.asset-filters, .asset-pager { align-items:center; }
+#asset-table table { table-layout:fixed; min-width:690px; }
+#asset-table :is(th,td) { overflow-wrap:anywhere; }
+#asset-table th:first-child { width:16%; }
+#asset-table th:last-child { width:28%; }
+.asset-pager button:disabled, #asset-download:disabled { opacity:.5; cursor:default; }

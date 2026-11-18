@@ -859,6 +859,307 @@ function downloadBatchCsv(button, item) {
   downloadBlob(new Blob([csv], {type:'text/csv;charset=utf-8'}), `${item.id}-version-check.csv`);
 }
 
+function parseAssetCsv(text, delimiter, limit = 5001) {
+  const records = [];
+  let record = [];
+  let field = '';
+  let quoted = false;
+  let closed = false;
+  const addField = () => {
+    record.push(field);
+    field = '';
+    closed = false;
+  };
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    if (quoted) {
+      if (char === '"' && text[i + 1] === '"') {
+        field += '"';
+        i++;
+      } else if (char === '"') {
+        quoted = false;
+        closed = true;
+      } else field += char;
+    } else if (char === delimiter) addField();
+    else if (char === '\r' || char === '\n') {
+      addField();
+      records.push(record);
+      if (records.length === limit) {
+        if (limit === 1 || !text.slice(i + 1).trim()) return records;
+        throw Error('자산은 한 파일에 최대 5,000행까지 대조할 수 있습니다.');
+      }
+      record = [];
+      if (char === '\r' && text[i + 1] === '\n') i++;
+    } else if (char === '"' && !field && !closed) quoted = true;
+    else if (closed || char === '"') throw Error('CSV의 따옴표 형식을 확인하세요.');
+    else field += char;
+  }
+  if (quoted) throw Error('CSV에 닫히지 않은 따옴표가 있습니다.');
+  if (field || closed || record.length) {
+    addField();
+    records.push(record);
+  }
+  return records;
+}
+
+function readAssetCsv(bytes) {
+  const signature = new Uint8Array(bytes, 0, Math.min(2, bytes.byteLength));
+  const encoding = signature[0] === 255 && signature[1] === 254 ? 'utf-16le'
+    : signature[0] === 254 && signature[1] === 255 ? 'utf-16be' : 'utf-8';
+  let text;
+  try {
+    text = new TextDecoder(encoding, {fatal:true}).decode(bytes);
+  } catch {
+    try {
+      if (encoding !== 'utf-8') throw Error();
+      text = new TextDecoder('euc-kr', {fatal:true}).decode(bytes);
+    } catch {
+      throw Error('파일을 읽을 수 없습니다. UTF-8 또는 CP949 CSV로 저장해 주세요.');
+    }
+  }
+  if (text.includes('\0')) throw Error('CSV 파일의 형식과 인코딩을 확인하세요.');
+  const candidates = [',', ';', '\t'].flatMap((delimiter) => {
+    try {
+      return [{delimiter, width:parseAssetCsv(text, delimiter, 1)[0]?.length || 0}];
+    } catch {
+      return [];
+    }
+  }).sort((a, b) => b.width - a.width);
+  if (!candidates.length) throw Error('CSV의 첫 행과 따옴표 형식을 확인하세요.');
+  const [headers, ...rows] = parseAssetCsv(text, candidates[0].delimiter);
+  if (!headers?.some((value) => value.trim()) || headers.length > 150) {
+    throw Error('첫 행에 CSV 열 이름이 있어야 합니다. 최대 150열까지 지원합니다.');
+  }
+  const records = rows.map((cells, index) => ({cells, number:index + 2}))
+    .filter(({cells}) => cells.some((value) => value.trim()));
+  if (!records.length) throw Error('헤더 아래에 대조할 자산 행이 없습니다.');
+  if (records.some(({cells}) => cells.length > headers.length)) {
+    throw Error('헤더보다 열이 많은 행이 있습니다. CSV의 구분자와 따옴표를 확인하세요.');
+  }
+  return {headers, records};
+}
+
+const assetName = (value) => String(value || '').normalize('NFKC').toLowerCase().trim().replace(/\s+/g, ' ');
+const assetHeaderAliases = {
+  assetId: ['asset id','asset_id','asset','hostname','host','자산 id','자산명','호스트명','자산코드'],
+  version: ['installed version','installed_version','version','설치 버전','설치버전','버전'],
+  product: ['product','software','제품','제품명','소프트웨어'],
+  exposure: ['external exposure','internet exposed','exposure','외부 노출','외부노출','외부 노출 여부'],
+  build: ['build type','installation type','설치 유형','빌드 유형'],
+  conditions: ['exploit conditions','conditions','영향 조건','영향조건','악용 조건'],
+};
+const assetExposure = {
+  yes: ['예','y','yes','true','1','외부 노출','외부','public','external'],
+  no: ['아니오','아니요','n','no','false','0','내부 전용','내부','internal','private'],
+};
+const assetBuild = {
+  upstream: ['upstream','공지 대상 제품 릴리스','공지 대상 제품의 릴리스'],
+  downstream: ['downstream','배포판 패키지','배포판 패키지·백포트·자체 빌드','백포트','자체 빌드'],
+};
+const assetConditions = {
+  met: ['met','해당','조건 충족'],
+  'not-met': ['not-met','미해당','해당 없음','조건 미충족'],
+};
+const assetValue = (mapping, value) => Object.keys(mapping).find((key) => mapping[key].includes(assetName(value))) || '';
+const assetExposureLabels = {yes:'외부 노출', no:'내부 전용', '':'미확인'};
+
+function compareAssetRows(records, products, item, mapping) {
+  const names = products.map((product) => new Set([
+    [compareProductLabel(product, item.product), ...(product.programFiles || [])].join(' · '),
+    ...(!product.platforms?.length && !product.modules?.length && !product.programFiles?.length ? [
+      product.product, [product.vendor, product.product].filter(Boolean).join(' '),
+    ] : []),
+  ].filter(Boolean).map(assetName)));
+  return records.map(({cells, number}) => {
+    const value = (field) => (cells[mapping[field]] || '').trim();
+    const productName = value('product');
+    const normalizedProduct = assetName(productName);
+    const matches = normalizedProduct ? names.flatMap((labels, index) =>
+      labels.has(normalizedProduct) ? [index] : []) : [];
+    const product = mapping.product === '' ? products[mapping.singleProduct]
+      : matches.length === 1 ? products[matches[0]] : undefined;
+    const version = value('version');
+    const exposure = assetValue(assetExposure, value('exposure'));
+    const build = mapping.build === '' ? mapping.defaultBuild : assetValue(assetBuild, value('build'));
+    const conditions = assetValue(assetConditions, value('conditions'));
+    const row = {number, id:value('assetId') || `CSV ${number}행`,
+      product:product ? compareProductLabel(product, item.product) : productName || '미확인',
+      version, exposure, source:cnaRecordUrl(item)};
+    if (!product || !version || version.length > 100) {
+      return {...row, status:'unknown', versionStatus:'추가 확인 필요', conditionStatus:'판정 전',
+        reason: !product ? (matches.length > 1 ? '일치하는 공지 제품 범위가 여러 개입니다.'
+          : 'CSV 제품명이 공지의 제품·플랫폼과 일치하는지 확인하세요.')
+          : !version ? '설치 버전이 비어 있습니다.' : '설치 버전이 100자를 초과합니다.'};
+    }
+    const outcome = installedVersionOutcome(product, version, build, conditions);
+    const officialUrl = product.officialTakes?.find(({release}) => release === hotfixInput.exec(version)?.[1].toUpperCase())?.patch.url;
+    return {...row, ...outcome, source:publicUrl(officialUrl) || row.source,
+      reason:[outcome.result?.reason, outcome.status === 'unknown' && outcome.explanation].filter(Boolean).join(' · ')};
+  }).sort((a, b) =>
+    ['', 'no', 'yes'].indexOf(b.exposure) - ['', 'no', 'yes'].indexOf(a.exposure)
+    || a.number - b.number);
+}
+
+const assetDialog = $('#asset-dialog');
+const assetForm = $('#asset-form');
+const assetFile = $('#asset-file');
+const assetStatus = $('#asset-status');
+const assetResultFilter = $('#asset-result-filter');
+const assetExternalOnly = $('#asset-external-only');
+const assetPageSize = 50;
+let assetSession;
+let displayedAssets = [];
+let assetPage = 0;
+
+function resetAssetResult() {
+  displayedAssets = [];
+  assetPage = 0;
+  if (assetSession) assetSession.results = [];
+  $('#asset-results').hidden = true;
+  $('#asset-table').replaceChildren();
+  $('#asset-totals').textContent = '';
+  $('#asset-page').textContent = '';
+}
+
+function openAssetCsv(item) {
+  assetSession = {item, products:comparisonProducts(item), results:[]};
+  resetAssetForm();
+  $('#asset-cve').textContent = item.id;
+  assetDialog.showModal();
+}
+
+function resetAssetForm() {
+  assetForm.reset();
+  assetStatus.textContent = '';
+  $('#asset-fields').hidden = true;
+  resetAssetResult();
+}
+
+assetDialog.addEventListener('close', () => {
+  assetSession = undefined;
+  resetAssetForm();
+  $('#asset-cve').textContent = '';
+  for (const key of [...Object.keys(assetHeaderAliases), 'singleProduct']) {
+    assetForm.elements[key].replaceChildren();
+  }
+});
+
+assetFile.addEventListener('change', async () => {
+  const session = assetSession;
+  const file = assetFile.files[0];
+  if (!session) return;
+  session.records = undefined;
+  resetAssetResult();
+  $('#asset-fields').hidden = true;
+  assetStatus.textContent = '';
+  if (!file) return;
+  if (file.size > 2 * 1024 * 1024) {
+    assetStatus.textContent = '2MB 이하의 CSV 파일을 선택하세요.';
+    return;
+  }
+  assetStatus.textContent = '브라우저에서 CSV를 읽고 있습니다.';
+  try {
+    const bytes = await file.arrayBuffer();
+    if (session !== assetSession || assetFile.files[0] !== file) return;
+    const {headers, records} = readAssetCsv(bytes);
+    session.records = records;
+    for (const [key, aliases] of Object.entries(assetHeaderAliases)) {
+      const control = assetForm.elements[key];
+      control.replaceChildren(new Option(key === 'version' ? '열을 선택하세요' : '연결 안 함', ''),
+        ...headers.map((label, index) => new Option(`${index + 1}. ${label.trim() || '이름 없는 열'}`, index)));
+      const matches = headers.flatMap((label, index) => aliases.includes(assetName(label)) ? [index] : []);
+      control.value = matches.length === 1 ? matches[0] : '';
+    }
+    assetForm.elements.singleProduct.replaceChildren(new Option('공지 제품을 선택하세요', ''),
+      ...session.products.map((product, index) => new Option(compareProductLabel(product, session.item.product), index)));
+    assetForm.elements.defaultBuild.value = '';
+    syncAssetMapping();
+    $('#asset-fields').hidden = false;
+    assetStatus.textContent = `자산 ${records.length.toLocaleString('ko-KR')}행을 읽었습니다. CSV 열 연결을 확인하세요.`;
+  } catch (error) {
+    if (session === assetSession && assetFile.files[0] === file) assetStatus.textContent = error.message;
+  }
+});
+
+function syncAssetMapping() {
+  const {product, singleProduct, build, defaultBuild} = assetForm.elements;
+  singleProduct.required = product.value === '';
+  singleProduct.disabled = product.value !== '';
+  defaultBuild.disabled = build.value !== '';
+}
+
+assetForm.addEventListener('change', (event) => {
+  if (event.target === assetFile) return;
+  syncAssetMapping();
+  if (assetSession?.results.length) {
+    resetAssetResult();
+    assetStatus.textContent = '열 연결이 바뀌었습니다. 다시 대조해 주세요.';
+  }
+});
+
+assetForm.addEventListener('submit', (event) => {
+  event.preventDefault();
+  const session = assetSession;
+  if (!session?.records?.length) return;
+  const mapping = Object.fromEntries([...Object.keys(assetHeaderAliases), 'singleProduct', 'defaultBuild']
+    .map((key) => [key, assetForm.elements[key].value]));
+  const assigned = Object.keys(assetHeaderAliases).map((key) => mapping[key]).filter(Boolean);
+  if (new Set(assigned).size !== assigned.length) {
+    assetStatus.textContent = 'CSV 열 하나를 두 항목에 연결했습니다. 열 연결을 확인하세요.';
+    return;
+  }
+  session.results = compareAssetRows(session.records, session.products, session.item, mapping);
+  assetResultFilter.replaceChildren(new Option('전체', ''),
+    ...Object.entries(batchLabels).map(([key, label]) => new Option(label, key)));
+  assetExternalOnly.checked = false;
+  const counts = Object.fromEntries(Object.keys(batchLabels).map((key) => [key, 0]));
+  session.results.forEach(({status}) => counts[status]++);
+  $('#asset-totals').textContent = [
+    `총 ${session.results.length}행`, ...Object.entries(batchLabels).map(([key,label]) => `${label} ${counts[key]}행`),
+  ].join(' · ');
+  assetStatus.textContent = '자산 대조를 완료했습니다.';
+  $('#asset-results').hidden = false;
+  filterAssetResults();
+});
+
+function renderAssetResults() {
+  const start = assetPage * assetPageSize;
+  const rows = displayedAssets.slice(start, start + assetPageSize);
+  $('#asset-table').innerHTML = rows.length ? `<div class="batch-results"><table>
+    <thead><tr><th scope="col">자산 ID</th><th scope="col">제품 · 설치 버전</th><th scope="col">외부 노출</th>
+      <th scope="col">판정</th><th scope="col">근거</th></tr></thead><tbody>
+    ${rows.map((row) => `<tr><th scope="row">${escape(row.id)}</th>
+      <td>${escape(row.product)}<br>${escape(row.version || '버전 미확인')}</td>
+      <td>${assetExposureLabels[row.exposure]}</td>
+      <td><strong>${batchLabels[row.status]}</strong><br><small>${row.versionStatus} · 조건 ${row.conditionStatus}</small></td>
+      <td>${escape(row.reason)} ${link(row.source, '원문')}</td></tr>`).join('')}
+    </tbody></table></div>` : '<p class="feed-note">선택한 필터에 해당하는 자산이 없습니다.</p>';
+  $('#asset-page').textContent = rows.length ? `${start + 1}–${start + rows.length} / ${displayedAssets.length}행` : '0행';
+  $('#asset-previous').disabled = assetPage === 0;
+  $('#asset-next').disabled = start + assetPageSize >= displayedAssets.length;
+  $('#asset-download').disabled = !displayedAssets.length;
+}
+
+function filterAssetResults() {
+  displayedAssets = assetSession.results.filter(({status, exposure}) =>
+    (!assetResultFilter.value || assetResultFilter.value === status) && (!assetExternalOnly.checked || exposure === 'yes'));
+  assetPage = 0;
+  renderAssetResults();
+}
+
+assetResultFilter.addEventListener('change', filterAssetResults);
+assetExternalOnly.addEventListener('change', filterAssetResults);
+$('#asset-previous').addEventListener('click', () => { assetPage--; renderAssetResults(); });
+$('#asset-next').addEventListener('click', () => { assetPage++; renderAssetResults(); });
+$('#asset-download').addEventListener('click', () => {
+  const id = assetSession.item.id;
+  const header = ['CVE', 'CSV 행', '자산 ID', '제품', '설치 버전', '외부 노출', '판정', '버전 판정', '영향 조건', '판정 근거', '출처'];
+  const rows = displayedAssets.map((row) => [id,row.number,row.id,row.product,row.version,assetExposureLabels[row.exposure],
+    batchLabels[row.status],row.versionStatus,row.conditionStatus,row.reason,row.source]);
+  const csv = '\uFEFF' + [header, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n') + '\r\n';
+  downloadBlob(new Blob([csv], {type:'text/csv;charset=utf-8'}), `${id}-asset-check.csv`);
+});
+
 function showInstalledVersionResult(event, item) {
   event.preventDefault();
   const form = event.target.closest('[data-version-check]');
@@ -1161,6 +1462,7 @@ function renderInspector(panel = $('#inspector'), item = selected) {
     <div class="actions triage-actions">
       <button class="outline" data-guide="check">${icon('shield')}안전한 점검</button>
       <button class="outline" type="button" data-generate-advisory>${icon('doc')}보안공지문 생성</button>
+      ${comparisonProducts(item).length ? '<button class="outline" type="button" data-asset-csv>자산 CSV 대조</button>' : ''}
       <button class="outline" type="button" data-share-cve>${icon('doc')}이 CVE 공유</button>
       <button class="outline" type="button" data-copy-cve>${icon('link')}이 CVE 링크 복사</button>
       <span class="copy-status" role="status"></span>
@@ -1527,6 +1829,7 @@ function detailsAction(event, item) {
   if (copy) copyCveLink(copy, item);
   const share = event.target.closest('[data-share-cve]');
   if (share) openCveMail(share, item);
+  if (event.target.closest('[data-asset-csv]')) openAssetCsv(item);
   const advisory = event.target.closest('[data-generate-advisory]');
   if (advisory) openAdvisory(advisory, item);
   const batch = event.target.closest('[data-export-batch]');

@@ -275,6 +275,10 @@ function updateClock(stamp) {
   const next = new Date(collected);
   next.setUTCHours(Math.floor(next.getUTCHours() / 2) * 2, 17, 0, 0);
   if (next <= collected) next.setUTCHours(next.getUTCHours() + 2);
+  const morning = new Date(collected);
+  morning.setUTCHours(21, 17, 0, 0);
+  if (morning <= collected) morning.setUTCDate(morning.getUTCDate() + 1);
+  if (morning < next) next.setTime(morning.getTime());
   $('#next-update').dateTime = next.toISOString();
   $('#next-update').textContent = date(next);
   const tick = () => {
@@ -2173,16 +2177,20 @@ $('#email-form').addEventListener('submit', (event) => {
 });
 
 function showSourceStatus() {
-  const states = {ok:'수집', stale:'이전 데이터', unavailable:'수집 실패'};
+  const states = {ok:'수집', stale:'이전 데이터', unavailable:'수집 실패', partial:'부분 수집'};
   const entries = Object.entries(data.sources);
+  const count = (status) => Number.isInteger(status.expected)
+    ? `${status.count}/${status.expected}건` : `${status.count}건`;
   $('#source-status-list').innerHTML = entries.map(([name, status]) =>
-    `<li>${escape(name)} <span>${escape(states[status.state] || '미확인')} · ${status.count}건${status.at ? ` · ${escape(date(status.at))}` : ''}</span></li>`).join('');
+    `<li>${escape(name)} <span>${escape(states[status.state] || '미확인')} · ${escape(count(status))}${status.at ? ` · ${escape(date(status.at))}` : ''}</span></li>`).join('');
   const alert = $('#source-alert');
-  const delayed = entries.filter(([, status]) => status.state === 'stale' || status.state === 'unavailable');
+  const delayed = entries.filter(([, status]) => status.state !== 'ok');
   alert.hidden = delayed.length === 0;
   alert.innerHTML = delayed.length ? `
-    <strong>일부 출처 지연</strong>
-    <span>${delayed.map(([name, status]) => `${escape(name)} · ${status.at ? `마지막 성공 ${escape(date(status.at))}` : '수집 실패'}`).join(' / ')}</span>
+    <strong>일부 출처 수집 미완료</strong>
+    <span>${delayed.map(([name, status]) => `${escape(name)} · ${status.state === 'partial'
+      ? `부분 수집 ${escape(count(status))}` : status.at ? `마지막 성공 ${escape(date(status.at))}` : '수집 실패'}`).join(' / ')}</span>
+    ${data.collection?.lastCompleteAt ? `<span>마지막 전체 수집 ${escape(date(data.collection.lastCompleteAt))}</span>` : ''}
     <a href="#source-status" data-source-status>전체 상태 보기</a>` : '';
 }
 

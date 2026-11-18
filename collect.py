@@ -2,6 +2,7 @@
 """Refresh the public, read-only dashboard snapshot."""
 import concurrent.futures
 import datetime as dt
+from dataclasses import dataclass
 import email.utils
 import gzip
 import html
@@ -12,6 +13,8 @@ import os
 from pathlib import Path
 import re
 import sys
+import threading
+import time
 import urllib.parse as url
 import urllib.request as http
 import xml.etree.ElementTree as xml
@@ -34,6 +37,11 @@ NVD = 'https://services.nvd.nist.gov/rest/json/cves/2.0'
 KEV = 'https://raw.githubusercontent.com/cisagov/kev-data/develop/known_exploited_vulnerabilities.json'
 DEBIAN_TRACKER = 'https://security-tracker.debian.org/tracker/data/json'
 DEBIAN_SUITES = ('bullseye', 'bookworm', 'trixie')
+SOURCE_ERRORS = (OSError, ValueError, KeyError, TypeError, EOFError, xml.ParseError)
+NVD_PAGE_SIZE = 2000
+NVD_REQUEST_INTERVAL = 6
+nvd_request_lock = threading.Lock()
+next_nvd_request = 0.0
 
 
 def google(query):
@@ -53,8 +61,15 @@ FEEDS = {
 
 def get(address):
     headers = {'User-Agent': 'SecurityInsight/1.0 (public security feeds)'}
-    if address.startswith(NVD) and os.environ.get('NVD_API_KEY'):
-        headers['apiKey'] = os.environ['NVD_API_KEY']
+    if address.startswith(NVD):
+        global next_nvd_request
+        with nvd_request_lock:
+            delay = next_nvd_request - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            next_nvd_request = time.monotonic() + NVD_REQUEST_INTERVAL
+        if os.environ.get('NVD_API_KEY'):
+            headers['apiKey'] = os.environ['NVD_API_KEY']
     with http.urlopen(http.Request(address, headers=headers), timeout=22) as response:
         return response.read(16 * 1024 * 1024)
 
@@ -208,13 +223,43 @@ def recent_kev(catalog):
                  origin='CISA KEV') for item in entries]
 
 
+@dataclass
+class NvdWindow:
+    records: dict
+    expected: int
+    error: str | None = None
+
+
 def nvd_recent(modified=False):
     start = (NOW - (dt.timedelta(hours=24) if modified else dt.timedelta(days=3))).strftime('%Y-%m-%dT%H:%M:%S.000')
     end = NOW.strftime('%Y-%m-%dT%H:%M:%S.000')
     prefix = 'lastMod' if modified else 'pub'
-    params = url.urlencode({prefix + 'StartDate':start, prefix + 'EndDate':end, 'resultsPerPage':2000})
-    payload = json.loads(get(NVD + '?' + params))
-    return {row['cve']['id']: row['cve'] for row in payload['vulnerabilities']}
+    params = {prefix + 'StartDate': start, prefix + 'EndDate': end, 'resultsPerPage': NVD_PAGE_SIZE}
+    records = {}
+    expected = None
+    offset = 0
+    while True:
+        try:
+            payload = json.loads(get(NVD + '?' + url.urlencode({**params, 'startIndex': offset})))
+            total = payload['totalResults']
+            rows = payload['vulnerabilities']
+            if type(total) is not int or total < 0 or payload['startIndex'] != offset:
+                raise ValueError('NVD returned invalid pagination metadata')
+            if expected is None:
+                expected = total
+            if total != expected or len(rows) != min(NVD_PAGE_SIZE, expected - offset):
+                raise ValueError('NVD page size or total changed during collection')
+            page = {row['cve']['id']: row['cve'] for row in rows}
+            if len(page) != len(rows) or records.keys() & page.keys():
+                raise ValueError('NVD returned duplicate CVE IDs across the window')
+            records.update(page)
+        except SOURCE_ERRORS as error:
+            if expected is None:
+                raise
+            return NvdWindow(records, expected, str(error))
+        offset += len(rows)
+        if offset == expected:
+            return NvdWindow(records, expected)
 
 
 def nvd_selected(ids):
@@ -680,6 +725,37 @@ def build_history(records, previous):
     return sorted(history, key=lambda event: moment(event['at']), reverse=True)
 
 
+def collect_source(name, job, fallback, previous_status, retry=False):
+    best_partial = None
+    attempts = 2 if retry else 1
+    for number in range(1, attempts + 1):
+        try:
+            result = job()
+            if isinstance(result, NvdWindow):
+                if result.error is not None:
+                    if best_partial is None or len(result.records) >= len(best_partial.records):
+                        best_partial = result
+                    raise ValueError(result.error)
+                return result.records, dict(state='ok', at=NOW.isoformat(), count=len(result.records),
+                                            expected=result.expected, attempts=number)
+            if not result and name in ('cve.now', 'CISA KEV', 'Debian Security Tracker', *FEEDS):
+                raise ValueError('empty upstream feed')
+            return result, dict(state='ok', at=NOW.isoformat(), count=len(result), attempts=number)
+        except SOURCE_ERRORS as error:
+            print(f'{name} (attempt {number}/{attempts}): {error}', file=sys.stderr)
+            if number < attempts:
+                time.sleep(8)
+    if best_partial is not None:
+        return best_partial.records, dict(state='partial', at=NOW.isoformat(), count=len(best_partial.records),
+                                          expected=best_partial.expected, lastSuccessfulAt=previous_status.get('lastSuccessfulAt')
+                                          or (previous_status.get('at') if previous_status.get('state') != 'partial' else None),
+                                          attempts=attempts)
+    return fallback, dict(state='stale' if fallback else 'unavailable',
+                          at=previous_status.get('lastSuccessfulAt')
+                          or (previous_status.get('at') if previous_status.get('state') != 'partial' else None),
+                          count=len(fallback), attempts=attempts)
+
+
 def collect():
     path = ROOT / 'data.json'
     previous = json.loads(path.read_text()) if path.exists() else {}
@@ -696,16 +772,12 @@ def collect():
     except (OSError, ValueError):
         previous_archive = {}
 
+    morning = 6 <= NOW.astimezone(KST).hour < 8
+
     def attempt(name, job, fallback):
-        try:
-            result = job()
-            statuses[name] = dict(state='ok', at=NOW.isoformat(), count=len(result))
-            return result
-        except (OSError, ValueError, KeyError, TypeError, EOFError, xml.ParseError) as error:
-            print(f'{name}: {error}', file=sys.stderr)
-            prior = previous.get('sources', {}).get(name, {})
-            statuses[name] = dict(state='stale' if fallback else 'unavailable', at=prior.get('at'), count=len(fallback))
-            return fallback
+        result, status = collect_source(name, job, fallback, previous.get('sources', {}).get(name, {}), retry=morning)
+        statuses[name] = status
+        return result
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=12) as pool:
         feed_jobs = {name: pool.submit(attempt, name, lambda n=name, a=address, k=kind: rss(n, a, k),
@@ -727,7 +799,7 @@ def collect():
         debian_job = pool.submit(attempt, 'Debian Security Tracker', fetch_debian_packages, previous_debian)
         if statuses['cve.now']['state'] == 'unavailable' and any(row.get('origin') == 'cve.now' for row in old_rows.values()):
             prior = previous.get('sources', {}).get('cve.now', {})
-            statuses['cve.now'] = dict(state='stale', at=prior.get('at'), count=prior.get('count', 0))
+            statuses['cve.now'].update(state='stale', count=prior.get('count', 0))
         probability_job = pool.submit(attempt, 'FIRST EPSS', lambda: epss([row['id'] for row in items]), {})
         feeds = {name: job.result() for name, job in feed_jobs.items()}
         missing = [item['id'] for item in items if item['id'] in kev and item['id'] not in nvd]
@@ -757,11 +829,6 @@ def collect():
     records = enrich_cves(records, previous, translations)
     for item in records:
         annotate_review_fields(item)
-    snapshot = dict(updatedAt=NOW.isoformat(), cves=records, news=news, feeds=feeds,
-                    history=build_history(records, previous), sources=dict(sorted(statuses.items())))
-    temp = path.with_suffix('.tmp')
-    temp.write_text(json.dumps(snapshot, ensure_ascii=False, separators=(',', ':')) + '\n', encoding='utf-8')
-    temp.replace(path)
     lookup = ROOT / 'debian-packages.json'
     lookup_temp = lookup.with_suffix('.tmp')
     lookup_temp.write_text(json.dumps(debian, ensure_ascii=False, separators=(',', ':')) + '\n', encoding='utf-8')
@@ -771,6 +838,22 @@ def collect():
     write_archive_temp = write_archive.with_suffix('.tmp')
     write_archive_temp.write_text(json.dumps(archive, ensure_ascii=False, separators=(',', ':')) + '\n', encoding='utf-8')
     write_archive_temp.replace(write_archive)
+    blocked = sorted(name for name, status in statuses.items() if status['state'] != 'ok')
+    completed_at = dt.datetime.now(dt.timezone.utc).isoformat()
+    snapshot = dict(
+        updatedAt=NOW.isoformat(), cves=records, news=news, feeds=feeds,
+        history=build_history(records, previous), sources=dict(sorted(statuses.items())),
+        collection=dict(
+            state='complete' if not blocked else 'degraded',
+            completedAt=completed_at,
+            lastCompleteAt=completed_at if not blocked else (previous.get('collection') or {}).get('lastCompleteAt'),
+            blockedSources=blocked,
+            runId=os.environ.get('GITHUB_RUN_ID'), runAttempt=os.environ.get('GITHUB_RUN_ATTEMPT'),
+        ),
+    )
+    temp = path.with_suffix('.tmp')
+    temp.write_text(json.dumps(snapshot, ensure_ascii=False, separators=(',', ':')) + '\n', encoding='utf-8')
+    temp.replace(path)
     print(f'{len(records)} CVEs, {len(news)} linked news items, {sum(bool(article.get("image")) for article in news)} with publisher images')
 
 

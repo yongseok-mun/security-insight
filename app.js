@@ -614,7 +614,8 @@ function installedVersionCheck(item) {
       <summary>설치 버전·영향 조건 대조</summary>
       ${products.length ? `
       <form data-version-check>
-        <p class="version-hint">입력값은 이 화면에서만 사용합니다. 제품과 설치 버전은 공지에 쓰인 형식으로 입력하세요.</p>
+        <p class="version-hint">입력값은 이 화면에서만 사용합니다. 제품과 설치 버전은 공지에 쓰인 형식으로 입력하세요.
+          ${products.some((product) => checkpointHotfixRanges(product).length) ? ' Check Point Jumbo Hotfix 대상은 릴리스와 Take를 함께 입력하세요. 예: R82.10 Take 50' : ''}</p>
         <label class="batch-toggle"><input type="checkbox" name="batch"> 여러 버전 일괄 대조</label>
         <div class="version-fields">
           <label>공지 제품<select name="product" required>
@@ -641,9 +642,44 @@ function installedVersionCheck(item) {
     </details>`;
 }
 
+const hotfixBoundary = /^(R\d+(?:\.\d+)?) with Jumbo Hotfix Take (\d+) or below$/i;
+const hotfixInput = /^(R\d+(?:\.\d+)?)(?:\s+(?:with\s+)?(?:Jumbo Hotfix\s+)?Take\s+(\d+))?$/i;
+
+function checkpointHotfixRanges(product) {
+  if (!/^check\s*point$/i.test(product.vendor) ||
+    !/^Quantum Security (Gateway|Management)$/i.test(product.product)) return [];
+  return (product.versions || []).flatMap((entry) => {
+    const match = hotfixBoundary.exec(entry.version);
+    return match && entry.status === 'affected' && !entry.lessThan && !entry.lessThanOrEqual && !entry.changes?.length
+      ? [{entry, release:match[1].toUpperCase(), max:BigInt(match[2])}] : [];
+  });
+}
+
+function evaluateCheckpointHotfix(product, version) {
+  const ranges = checkpointHotfixRanges(product);
+  if (!ranges.length) return null;
+  const parsed = hotfixInput.exec(version);
+  if (!parsed) return {status:'unknown', reason:'설치 릴리스와 Jumbo Hotfix Take를 함께 입력하세요. 예: R82.10 Take 50'};
+  const [, release, take] = parsed;
+  const matching = ranges.filter((range) => range.release === release.toUpperCase());
+  if (!matching.length) return null;
+  if (!take) return {status:'unknown', reason:`${release.toUpperCase()}의 Jumbo Hotfix Take 번호가 필요합니다. 관리 콘솔에서 확인하세요.`};
+
+  const within = matching.filter(({max}) => BigInt(take) <= max);
+  const parsedEntries = new Set(ranges.map(({entry}) => entry));
+  const other = (product.versions || []).filter((entry) => !parsedEntries.has(entry));
+  const otherResults = other.map((entry) => evaluateVersionEntry(entry, version, null));
+  if (within.length && otherResults.every((status) => ['outside', 'affected'].includes(status))) {
+    return {status:'affected', reason:versionLabel(within[0].entry)};
+  }
+  return {status:'unknown', reason:within.length
+    ? '동일 제품에 추가 버전 조건이 있습니다. 벤더 공지에서 조건을 함께 대조하세요.'
+    : `${release.toUpperCase()}의 명시된 영향 Take 범위를 벗어났습니다. 수정 적용 여부는 벤더 공지에서 확인하세요.`};
+}
+
 function installedVersionOutcome(product, version, build, conditions) {
   const upstream = build === 'upstream';
-  const result = upstream ? evaluateInstalledVersion(product, version) : null;
+  const result = upstream ? evaluateCheckpointHotfix(product, version) || evaluateInstalledVersion(product, version) : null;
   let status = 'unknown';
   let headline = '추가 확인 필요';
   let explanation = '벤더 공지에서 제품 에디션·기능 설정과 영향 조건을 확인하세요.';
@@ -658,6 +694,8 @@ function installedVersionOutcome(product, version, build, conditions) {
     status = 'affected';
     headline = '공지상 영향 조건에 해당';
     explanation = '확인한 조건과 설치 버전을 기준으로 패치 또는 완화조치를 검토하세요.';
+  } else if (result.status === 'affected' && !conditions) {
+    explanation = '설치 버전이 공지의 영향 범위에 해당합니다. 악용 전제조건을 확인하세요.';
   } else if (result.status === 'affected' && conditions === 'not-met') {
     explanation = '버전은 영향 범위에 해당합니다. 확인한 필수 조건과 다른 악용 경로가 있는지 공지에서 다시 대조하세요.';
   }
@@ -680,7 +718,29 @@ function patchRecords(item) {
   ].filter(({version}) => version.match(patchVersionPattern)?.[0] === version);
 }
 
-const knownPatchVersions = (item) => [...new Set(patchRecords(item).map(({version}) => version))];
+function patchProduct(item, patch) {
+  return Number.isInteger(patch.productIndex) ? item.cna?.affected?.[patch.productIndex] : undefined;
+}
+
+function patchEvidenceDetails(patches) {
+  return patches.map(({version, source, url, text}) => `<details>
+    <summary>${escape(version)} · ${escape(source)}</summary>
+    <p>${escape(text)}</p>${link(url, '근거 원문')}</details>`).join('');
+}
+
+function groupedPatchEvidence(item) {
+  const patches = patchRecords(item);
+  if (!patches.length) return `<p>수집된 수정 버전 미확인 · ${link(cnaRecordUrl(item), 'CNA 원문')}</p>`;
+  const groups = new Map();
+  for (const patch of patches) {
+    const product = patchProduct(item, patch);
+    const label = product ? compareProductLabel(product, item.product) : '제품·릴리스 적용 범위 확인 필요';
+    if (!groups.has(label)) groups.set(label, []);
+    groups.get(label).push(patch);
+  }
+  return [...groups].map(([label, records]) => `<div class="affected-product">
+    <strong>${escape(label)}</strong>${patchEvidenceDetails(records)}</div>`).join('');
+}
 
 function csvCell(value) {
   const text = String(value ?? '');
@@ -731,8 +791,9 @@ function renderInstalledVersionResult(form, item) {
     product.modules?.length ? `구성요소 · ${product.modules.join(', ')}` : '',
     ...attackConditions(item),
   ].filter(Boolean);
-  const fixes = knownPatchVersions(item);
-  const fixNote = fixes.join(', ') || '확인된 수정 버전 없음 · 원문 공지 참조';
+  const patches = patchRecords(item).filter((patch) => patchProduct(item, patch) === product);
+  const fixNote = patches.length ? [...new Set(patches.map(({version}) => version))].join(', ')
+    : '선택한 제품의 수정 버전 미확인 · 벤더 공지 참조';
   if (batch) {
     const counts = Object.entries(batchLabels).map(([status, label]) =>
       `${label} ${results.filter((entry) => entry.status === status).length}건`).join(' · ');
@@ -749,7 +810,7 @@ function renderInstalledVersionResult(form, item) {
         <th scope="row">${escape(version)}</th><td>${batchLabels[status]}</td>
         <td>${escape(result?.reason || explanation)}</td></tr>`).join('')}</tbody></table></div>
       <p data-batch-empty hidden>이 조건에 해당하는 버전이 없습니다.</p>
-      <p>수정 정보 · ${escape(fixNote)}</p>`;
+      <p>수정 정보 · ${escape(fixNote)}</p>${patchEvidenceDetails(patches)}`;
     return;
   }
   const [{version, headline, explanation, result}] = results;
@@ -763,16 +824,18 @@ function renderInstalledVersionResult(form, item) {
       <ul class="detail-list">${product.versions.map((entry) => `<li>${escape(versionLabel(entry))}</li>`).join('')}</ul>
     </details>` : ''}
     ${conditionNotes.length ? `<p>제품·CVSS 참고 조건 · ${escape(conditionNotes.join(' / '))}</p>` : ''}
-    <p>수정 정보 · ${escape(fixNote)}</p>`;
+    <p>수정 정보 · ${escape(fixNote)}</p>${patchEvidenceDetails(patches)}`;
 }
 
 function bilingual(item) {
   const english = item.descriptionEn || item.description;
-  const korean = item.descriptionKo;
+  const cached = publishedAdvisoryTranslations(item).find(([source]) => source === english)?.[1];
+  const korean = item.descriptionKo || cached;
+  const source = item.descriptionKo ? item.translationSource : cached ? '배포 전 기계 번역 · 원문 대조 필요' : '';
   const showMachine = english && !korean && 'Translator' in globalThis;
   return `
     <div class="bilingual">
-      <div><h4>한국어${korean && item.translationSource ? ` <small>${escape(item.translationSource)}</small>` : ''}</h4>
+      <div><h4>한국어${source ? ` <small>${escape(source)}</small>` : ''}</h4>
       <p class="cve-summary" data-translation>${escape(korean || '등록된 한국어 설명이 없습니다.')}</p>
       ${showMachine ? '<button class="utility" type="button" data-translate>한국어로 번역</button>' : ''}</div>
       <details class="english-original" lang="en"><summary>English original · 영문 원문</summary><p class="cve-summary">${escape(english || 'No English description was collected.')}</p></details>
@@ -799,9 +862,7 @@ function technicalDetails(item) {
     ${conditions.length ? `${listOf(conditions)}<small>CVSS 벡터 기준입니다. 기능 활성화, 배포 형태 등 추가 조건은 위 설명과 공지에서 확인하세요.</small>`
       : '<p>구조화된 조건을 확인하지 못했습니다. 위 설명과 원문 공지에서 조건을 확인하세요.</p>'}
     <h3>패치 버전</h3>
-    ${item.fixes.length ? `<p>${escape(item.fixes.join(', '))} <small>· cve.now 수정 버전 정보</small></p>` : ''}
-    ${item.describedFixes?.length ? `<p>${escape(item.describedFixes.join(', '))} <small>· 취약점 설명에 명시된 수정 버전</small></p>` : ''}
-    ${!item.fixes.length && !item.describedFixes?.length && !cna.solutions?.length ? '<p>패치 버전 미확인</p>' : ''}
+    ${groupedPatchEvidence(item)}
     ${cna.solutions?.length ? `<small>CNA 해결책 원문</small>${listOf(cna.solutions)}` : ''}
     <h3>완화조치</h3>
     ${cna.workarounds?.length ? `<small>CNA 임시 조치 원문</small>${listOf(cna.workarounds)}`
@@ -843,11 +904,16 @@ function actionSummary(item) {
   const affected = item.cna?.affected || [];
   const ranges = affectedRanges(item);
   const conditions = attackConditions(item);
-  const fixes = knownPatchVersions(item);
+  const patches = patchRecords(item);
+  const scopedPatches = [...new Set(patches.flatMap((patch) => {
+    const product = patchProduct(item, patch);
+    return product ? [`${product.product || item.product} · ${patch.version}`] : [];
+  }))];
+  const hotfix = affected.some((product) => checkpointHotfixRanges(product).length);
   const platforms = [...new Set(affected.flatMap((product) => product.platforms || []))];
   const modules = [...new Set(affected.flatMap((product) => product.modules || []))];
   const firstCheck = [
-    '설치 버전·빌드를 영향 범위와 대조하세요.',
+    hotfix ? '설치 릴리스와 Jumbo Hotfix Take를 함께 확인하세요.' : '설치 버전·빌드를 영향 범위와 대조하세요.',
     platforms.length ? `대상 플랫폼 · ${platforms.join(', ')}.` : '',
     modules.length ? `구성요소 사용 여부 · ${modules.join(', ')}.` : '',
     conditions.includes('접근 경로 · 네트워크') ? '관리 대상 서비스의 접근 가능 경로도 확인하세요.' : '',
@@ -856,10 +922,15 @@ function actionSummary(item) {
   return `
     <section class="action-summary">
       <h3>조치 요약</h3>
+      ${(item.cna?.references?.[0] || item.references?.[0] || item.notices?.[0]) ? `<p class="action-sources">
+        ${link(item.cna?.references?.[0] || item.references?.[0], '벤더 공지')}
+        ${item.notices?.[0] ? link(item.notices[0].url, 'KISA 보호나라 공지') : ''}
+      </p>` : ''}
       <dl>
         <div><dt>영향 버전 <small>CNA</small></dt><dd>${visibleRanges || '명시된 영향 버전 미확인. 아래 영향 범위와 공지를 확인하세요.'}${ranges.length > 3 ? `<br><small>외 ${ranges.length - 3}개 범위 · 아래 영향 범위에 전체 표시</small>` : ''}</dd></div>
         <div><dt>성립 조건 <small>CVSS 기준</small></dt><dd>${escape(conditions.length ? conditions.join(' / ') : '구조화된 조건 미확인')}${conditions.length ? '<br><small>제품별 설정·기능 조건은 아래 설명과 원문 참조</small>' : ''}</dd></div>
-        <div><dt>수정 버전</dt><dd>${escape(fixes.length ? fixes.join(', ') : item.cna?.solutions?.[0] || '수정 버전 미확인 · 벤더 공지 참조')}</dd></div>
+        <div><dt>수정 버전</dt><dd>${escape(scopedPatches.length ? scopedPatches.join(' / ') : patches.length ?
+          '제품·릴리스별 적용 범위 확인 필요 · 아래 패치 근거 참조' : '수정 버전 미확인 · 벤더 공지 참조')}</dd></div>
         <div><dt>첫 점검</dt><dd>${escape(firstCheck)}</dd></div>
       </dl>
     </section>`;
@@ -1019,6 +1090,33 @@ function showPage(name) {
   }
 }
 
+const articleCves = (article) => [...new Set((article.cves || []).filter((id) => /^CVE-\d{4}-\d{4,}$/.test(id)))];
+
+function newsCveLinks(ids) {
+  return ids.length ? `<div class="news-cves">${ids.map((id) =>
+    `<a href="${escape(cveUrl(id))}">${escape(id)} 상세</a>`).join('')}</div>` : '';
+}
+
+function groupedNewsArticles(items, heading = 'h3') {
+  const groups = new Map();
+  for (const item of items) {
+    const ids = articleCves(item);
+    if (ids.length !== 1 || item.kind === 'advisory') continue;
+    const [id] = ids;
+    if (!groups.has(id)) groups.set(id, []);
+    groups.get(id).push(item);
+  }
+  return items.map((item) => {
+    const [id] = articleCves(item);
+    const related = item.kind !== 'advisory' && articleCves(item).length === 1 ? groups.get(id) : undefined;
+    if (!related || related.length < 2) return newsArticle(item, heading);
+    if (related[0] !== item) return '';
+    return `<div class="news-issue">${newsArticle(item, heading)}
+      <details><summary>같은 CVE를 다룬 보도 ${related.length - 1}건</summary>
+      ${related.slice(1).map((article) => newsArticle(article, heading)).join('')}</details></div>`;
+  }).join('');
+}
+
 function newsArticle(item, heading = 'h3') {
   let image = '';
   try {
@@ -1030,7 +1128,8 @@ function newsArticle(item, heading = 'h3') {
   return `<article class="news-item">
     <span class="news-thumb" aria-hidden="true">${icon('news')}${image}</span>
     <div><small>${escape(item.publisher)} · ${escape(date(item.date))}${item.kind === 'aggregated' ? ' · Google 뉴스 경유' : ''}</small>
-    <${heading}>${link(item.url, item.title)}</${heading}></div></article>`;
+    <${heading}>${link(item.url, item.title)}</${heading}>
+    ${newsCveLinks(articleCves(item))}</div></article>`;
 }
 
 document.addEventListener('error', (event) => {
@@ -1151,7 +1250,7 @@ function renderOverview() {
   view.innerHTML = myWork() + watchBriefing() + overviewHistory() + sections.map(([target, title, articles]) => `
     <section class="digest">
       <header><h3>${title}</h3><button data-open="${target}">전체 보기 <span aria-hidden="true">→</span></button></header>
-      ${articles.slice(0, 4).map((article) => newsArticle(article, 'h4')).join('') || '<p>수집된 항목 없음</p>'}
+      ${groupedNewsArticles(articles.slice(0, 4), 'h4') || '<p>수집된 항목 없음</p>'}
     </section>`).join('') + `
     <section class="digest digest-cve">
       <header><h3>CVE 우선순위</h3><button data-open="cve">전체 보기 <span aria-hidden="true">→</span></button></header>
@@ -1184,7 +1283,7 @@ function filteredNews() {
   const name = $('#feed-source')?.value;
   const terms = ($('#news-query')?.value || '').trim().toLowerCase().split(/\s+/).filter(Boolean);
   return newsForPage().filter((item) => (!name || name === item.publisher)
-    && terms.every((term) => `${item.title} ${item.publisher} ${topic(item)}`.toLowerCase().includes(term)));
+    && terms.every((term) => `${item.title} ${item.publisher} ${topic(item)} ${articleCves(item).join(' ')}`.toLowerCase().includes(term)));
 }
 
 function renderFeed() {
@@ -1215,8 +1314,8 @@ function renderFeed() {
       }
     }
     $('#articles').innerHTML = (newsMode === 'topic' ? [...groups].map(([name, entries]) =>
-      `<section class="news-topic"><h3>${escape(name)} <span>${entries.length}건</span></h3>${entries.map((item) => newsArticle(item)).join('')}</section>`).join('')
-      : items.map((item) => newsArticle(item)).join('')) || '<p>조건에 맞는 기사가 없습니다.</p>';
+      `<section class="news-topic"><h3>${escape(name)} <span>${entries.length}건</span></h3>${groupedNewsArticles(entries, 'h4')}</section>`).join('')
+      : groupedNewsArticles(items)) || '<p>조건에 맞는 기사가 없습니다.</p>';
   };
   document.querySelectorAll('[data-news]').forEach((button) => button.addEventListener('click', () => {
     newsMode = button.dataset.news;
@@ -1382,7 +1481,6 @@ function advisoryEvidence(item, translations) {
     ${sourceLink}</details>` : '';
   const [, solutions, workarounds, requiredAction] = remediationValues(item);
   const overview = englishDescription(item);
-  const patches = patchRecords(item);
   return `
     ${pair('취약점 설명', overview, item.descriptionKo || koreanText(overview, translations), descriptionLink)}
     <h3>영향 버전 및 조건</h3>
@@ -1392,9 +1490,7 @@ function advisoryEvidence(item, translations) {
     </div>
     <p class="feed-note">CNA의 제품 범위와 NVD의 CPE 적용 조건을 각각 표시합니다. 제품·플랫폼이 같은지 확인한 뒤 범위를 비교하세요.</p>
     <h3>패치 버전</h3>
-    ${patches.length ? patches.map(({version,source,url,text}) => `<details>
-      <summary>${escape(version)} · ${escape(source)}</summary><p>${escape(text)}</p>
-      ${link(url, '근거 원문')}</details>`).join('') : `<p>수집된 수정 버전 미확인 · ${cna}</p>`}
+    ${groupedPatchEvidence(item)}
     <h3>해결책·완화조치</h3>
     ${[...solutions.map((source) => pair('CNA 해결책',source,koreanText(source,translations),cna)),
       ...workarounds.map((source) => pair('CNA 완화책',source,koreanText(source,translations),cna)),
@@ -1423,7 +1519,7 @@ function advisoryText(item, {comparison, version, translations = new Map()} = {}
   const networkPath = metrics.AV === 'N' || metrics.AV === 'A';
   const [, solutions, workarounds, requiredAction] = remediationValues(item);
   const patches = patchRecords(item);
-  const fixes = knownPatchVersions(item);
+  const scopedPatches = patches.filter((patch) => patchProduct(item, patch));
   const cna = cnaRecordUrl(item);
   const nvd = nvdRecordUrl(item);
   const vendors = advisoryReferences(item);
@@ -1484,20 +1580,23 @@ function advisoryText(item, {comparison, version, translations = new Map()} = {}
     ...(version ? ['', '[설치 버전 대조 참고]', version] : []),
     '',
     '5. 조치 방법(패치·완화·보안장비·접근제어)',
-    `- 패치: ${fixes.length ? `수집된 수정 버전 ${fixes.join(', ')}. 대상 릴리스의 수정 버전을 벤더 공지에서 확인 후 적용합니다.`
-      : '대상 릴리스의 수정 버전과 적용 절차를 벤더 공지에서 확인합니다.'}`,
-    ...patches.flatMap(({version,source,url}) => publicUrl(url)
-      ? [`- 수정 버전 ${version} · 근거(${source}): ${publicUrl(url)}`] : []),
-    ...(!fixes.length ? [`- 조치 원문 확인(CNA): ${cna}`] : []),
+    '- 패치: 대상 제품·릴리스의 수정 버전과 적용 절차를 벤더 공지에서 확인합니다.',
+    ...scopedPatches.flatMap((patch) => [
+      `- ${compareProductLabel(patchProduct(item, patch), item.product)} · 수정 버전 ${patch.version}`,
+      ...(publicUrl(patch.url) ? [`  근거(${patch.source}): ${publicUrl(patch.url)}`] : []),
+    ]),
+    ...(patches.some((patch) => !patchProduct(item, patch))
+      ? ['- 제품·릴리스와 연결되지 않은 수정 정보는 항목별 근거의 원문에서 확인합니다.'] : []),
+    ...(!scopedPatches.length ? [`- 조치 원문 확인: ${vendors[0] || cna}`] : []),
     ...[...new Set(solutions.map(localizedAction))].map((solution) => `  CNA 해결책: ${solution}`),
     ...(workarounds.length ? [...new Set(workarounds.map(localizedAction))].map((workaround) => `- 임시 완화(CNA): ${workaround}`)
       : ['- 임시 완화: 수집된 CNA 권고가 없습니다. 즉시 패치가 어려우면 벤더가 안내한 우회책의 적용 가능 여부를 확인합니다.']),
     ...(solutions.length || workarounds.length ? [`- 해결책·완화조치 근거(CNA): ${cna}`] : []),
     ...(requiredAction ? [`- CISA KEV 조치 권고: ${localizedAction(requiredAction)}`] : []),
-    '- 보안장비 정책(보완 통제): 영향 트래픽이 장비를 통과하고 해당 CVE의 벤더 검증 규칙이 있는 경우, 정상 업무 트래픽의 오탐을 확인한 뒤 WAF·IPS 정책 적용을 검토합니다.',
+    ...(networkPath ? ['- 보안장비 정책: 적용할 규칙은 해당 CVE의 벤더 공지에서 확인합니다.'] : []),
     networkPath ? '- 접근제어: 영향 인터페이스에 불필요한 접근을 차단하고 필요한 출발지·네트워크만 허용합니다.'
       : '- 접근제어: 영향 기능을 이용할 수 있는 계정·서비스 권한을 확인하고 불필요한 권한을 줄입니다.',
-    '- 조치 후 설치 버전·설정과 정상 서비스 동작을 재확인합니다. 보안장비 정책을 적용했다면 로그에서 탐지·차단과 오탐 여부를 확인합니다.',
+    '- 조치 후 설치 버전·설정과 정상 서비스 동작을 재확인합니다.',
     ...changes,
     '',
     '[근거 링크]',
@@ -1578,7 +1677,7 @@ function advisoryPreflightWarnings(item, text, changed, offline) {
   const scopeLinks = addresses(sections.get('3'));
   const actionLinks = addresses(sections.get('5'));
   const refs = [cnaRecordUrl(item), nvdRecordUrl(item), ...advisoryReferences(item)].map(canonical);
-  const patches = patchRecords(item);
+  const patches = patchRecords(item).filter((patch) => patchProduct(item, patch));
   if (!refs.some((url) => scopeLinks.has(url))) warnings.push('영향 범위 항목에 이 CVE의 수집 근거 링크를 추가하세요.');
   if (![...refs, ...patches.map((entry) => canonical(entry.url))].filter(Boolean).some((url) => actionLinks.has(url))) {
     warnings.push('조치 방법 항목에 이 CVE의 패치 또는 완화조치 근거 링크를 추가하세요.');
@@ -1587,10 +1686,10 @@ function advisoryPreflightWarnings(item, text, changed, offline) {
   const writtenVersions = new Set(actionText.split('\n').filter((line) => !line.includes(' · 근거(')
     && /수정 버전|패치|업데이트|업그레이드|upgrade|update/i.test(line))
     .flatMap((line) => line.replace(/https?:\/\/\S+/g, '').match(patchVersionPattern) || []));
-  if (!patches.length) warnings.push('수집 데이터에서 수정 버전이 확인되지 않았습니다. 벤더의 패치 공지를 확인하세요.');
+  if (!patches.length) warnings.push('수집된 근거에서 제품·릴리스별 수정 버전을 확인하세요.');
   else {
     const matched = patches.filter(({version}) => writtenVersions.has(version));
-    if (!matched.length) warnings.push(`조치 방법 본문에 수집된 수정 버전이 없습니다 · ${knownPatchVersions(item).join(', ')}`);
+    if (!matched.length) warnings.push(`조치 방법 본문에 수집된 수정 버전이 없습니다 · ${[...new Set(patches.map(({version}) => version))].join(', ')}`);
     else if (!matched.some(({url}) => actionLinks.has(canonical(url)))) warnings.push('본문에 적힌 수정 버전과 연결되는 근거 링크를 조치 방법에 추가하세요.');
   }
   if (changed) warnings.push('초안 기준 이후 패치 또는 완화 정보가 달라졌습니다. 변경 내용을 확인하고 본문을 갱신하세요.');
@@ -2003,7 +2102,7 @@ function buildMail() {
     title: `${item.id} · ${item.title}`,
     meta: `CVSS ${cvss(item)} · EPSS ${epss(item)} · KEV ${kev(item)}`,
     url: cveUrl(item.id),
-    note: item.fixes.length ? `수정 버전 ${item.fixes.join(', ')}` : '',
+    note: patchRecords(item).length ? '제품·릴리스별 패치 근거는 CVE 상세에서 확인' : '',
   }))]);
   if (page !== 'cve') {
     const articles = (page === 'home' ? data.news.slice(0, 8) : filteredNews()).map((item) => ({

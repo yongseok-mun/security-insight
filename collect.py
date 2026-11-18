@@ -24,6 +24,7 @@ MAX_CVES = 140
 NVD_EXTRA = 30
 ARCHIVE_LIMIT = 1800
 ARCHIVE_DAYS = 30
+ARCHIVE_NEWS_LIMIT = 16
 VERSION_TOKEN = r'[0-9]+(?:\.[0-9]+)+(?:[A-Za-z0-9+~_-]+(?:\.[A-Za-z0-9+~_-]+)*)?'
 CVE = re.compile(r'\bCVE-\d{4}-\d{4,}\b', re.I)
 DARK = re.compile(r'다크웹|랜섬웨어|탈취.*판매|dark.?web|ransomware|leak site', re.I)
@@ -318,8 +319,8 @@ def enrich_cves(records, previous, translations):
             affected = cna_info.get('affected', [])
             if not item.get('product') and affected:
                 item['product'] = affected[0].get('product') or None
-            if item['title'] == item['id'] and item.get('cnaTitle'):
-                item['title'] = item['cnaTitle']
+            if item['title'] == item['id']:
+                item['title'] = item.get('cnaTitle') or item.get('product') or item['id']
             english = item.get('descriptionEn') or item.get('cnaEnglish')
             if not item.get('descriptionEn') and item.get('cnaEnglish'):
                 item['descriptionEnSource'] = 'CNA'
@@ -533,21 +534,33 @@ def patch_evidence(item):
     for value in item.get('fixes', []):
         if re.fullmatch(VERSION_TOKEN, value):
             evidence.append(dict(version=value, source='cve.now 수정 정보', url=item.get('url'), text=value))
-    pattern = re.compile(rf'\b(?:fixed|patched|resolved)\s+in\s+(?:version\s+)?v?({VERSION_TOKEN})\b', re.I)
-    english = item.get('descriptionEn') or ''
+    fixed = re.compile(rf'\b(?:fixed|patched|resolved)\s+in\s+(?:version\s+)?v?({VERSION_TOKEN})(?![\w+~-]|\.\d)', re.I)
+    upgrade = re.compile(rf'\b(?:upgrade|update)\s+to\s+(?:version\s+)?v?({VERSION_TOKEN})(?![\w+~-]|\.\d)', re.I)
+    affected = (item.get('cna') or {}).get('affected', [])
+
+    def add_from_text(text, source, address, patterns):
+        for sentence in re.split(r'(?<=[.!?;])\s+|[\r\n]+', text):
+            for pattern in patterns:
+                for match in pattern.finditer(sentence.rstrip('.')):
+                    # Keep negated or conditional wording in the original advisory.
+                    if re.search(r'\b(?:not|never|unconfirmed|might|may|expected|planned)\b', sentence, re.I):
+                        continue
+                    scope = [index for index, product in enumerate(affected)
+                             if len(name := product.get('product', '')) >= 4
+                             and re.search(rf'(?<!\w){re.escape(name)}(?!\w)', sentence, re.I)]
+                    evidence.append(dict(version=match[1], source=source, url=address,
+                                         text=sentence[:2400], **({'productIndex': scope[0]} if len(scope) == 1 else {})))
+
     source = item.get('descriptionEnSource')
     if source in ('NVD', 'CNA'):
-        for match in pattern.finditer(english):
-            evidence.append(dict(version=match[1], source=f'{source} 설명 명시',
-                                 url=nvd if source == 'NVD' else cna, text=english[:2400]))
-    solution_pattern = re.compile(rf'\b(?:upgrade|update)\s+to\s+(?:(?!(?:CVE|CWE)-)[A-Za-z][\w+./-]*\s+){{0,4}}v?({VERSION_TOKEN})\b', re.I)
-    for text in (item.get('cna') or {}).get('solutions', []):
-        for match in [*pattern.finditer(text), *solution_pattern.finditer(text)]:
-            evidence.append(dict(version=match[1], source='CNA 해결책 명시', url=cna, text=text[:2400]))
+        add_from_text(item.get('descriptionEn') or '', f'{source} 설명 명시',
+                      nvd if source == 'NVD' else cna, [fixed])
+    for solution in (item.get('cna') or {}).get('solutions', []):
+        add_from_text(solution, 'CNA 해결책 명시', cna, [fixed, upgrade])
     seen = set()
     unique = []
     for entry in evidence:
-        key = (entry['version'], entry['source'], entry['url'])
+        key = (entry['version'], entry['source'], entry['url'], entry.get('productIndex'))
         if key not in seen:
             seen.add(key)
             unique.append(entry)
@@ -559,12 +572,24 @@ def annotate_review_fields(item):
     item['patchEvidence'] = patch_evidence(item)
 
 
-def build_archive(previous, prior_active, nvd, feed, active, kev, debian, news):
+def featured_news_cves(news, active_ids):
+    ranks = {}
+    for article in news:
+        for cve_id in article['cves']:
+            if cve_id in active_ids:
+                continue
+            advisory, count = ranks.get(cve_id, (False, 0))
+            ranks[cve_id] = (advisory or article['kind'] == 'advisory', count + 1)
+    return sorted(ranks, key=lambda cve_id: ranks[cve_id], reverse=True)[:ARCHIVE_NEWS_LIMIT]
+
+
+def build_archive(previous, prior_active, nvd, feed, active, kev, debian, news, translations):
     cutoff = NOW - dt.timedelta(days=ARCHIVE_DAYS)
     archive = {**previous, **prior_active}
     active_ids = {item['id'] for item in active}
     sources = {item['id']: item for item in feed}
-    for cve_id in set(nvd) | set(sources):
+    featured_ids = featured_news_cves(news, active_ids)
+    for cve_id in set(nvd) | set(sources) | set(featured_ids):
         record = nvd.get(cve_id, {})
         if record.get('vulnStatus', '').lower() == 'rejected':
             archive.pop(cve_id, None)
@@ -578,17 +603,33 @@ def build_archive(previous, prior_active, nvd, feed, active, kev, debian, news):
             item['debianPackages'] = debian[cve_id]
         # Keep CNA enrichment for items observed previously in the active list.
         old = archive.get(cve_id) or {}
-        for key in ('cna', 'cnaChecked', 'titleKo', 'translationSource'):
+        for key in ('cna', 'cnaChecked', 'cnaTitle', 'cnaEnglish', 'cnaKorean'):
             if key in old:
                 item[key] = old[key]
+        if not record and cve_id not in sources:
+            item = {**(old or item), 'archivedAt': NOW.isoformat()}
+            item['notices'] = [article for article in news if article['kind'] == 'advisory' and cve_id in article['cves']][:3]
+            if debian.get(cve_id):
+                item['debianPackages'] = debian[cve_id]
         annotate_review_fields(item)
         archive[cve_id] = item
+
+    cached = {**previous, **prior_active}
+    supplements = [archive[cve_id] for cve_id in featured_ids if cve_id in archive]
+    for item in enrich_cves(supplements, {'cves': [cached[cve_id] for cve_id in featured_ids if cve_id in cached]}, translations):
+        if not item.get('nvd') and item['id'] not in sources and not item.get('cnaChecked'):
+            archive.pop(item['id'], None)
+            continue
+        annotate_review_fields(item)
+        archive[item['id']] = item
+
     retained = []
     for key, item in archive.items():
         seen = moment(item.get('archivedAt') or item.get('lastDiscoveredAt'))
         if key not in active_ids and seen and seen >= cutoff:
             retained.append((key, {**item, 'archivedAt':seen.isoformat()}))
-    retained.sort(key=lambda pair: pair[1]['archivedAt'], reverse=True)
+    featured = set(featured_ids)
+    retained.sort(key=lambda pair: (pair[0] in featured, pair[1]['archivedAt'], pair[0]), reverse=True)
     return dict(retained[:ARCHIVE_LIMIT])
 
 
@@ -725,7 +766,7 @@ def collect():
     lookup_temp = lookup.with_suffix('.tmp')
     lookup_temp.write_text(json.dumps(debian, ensure_ascii=False, separators=(',', ':')) + '\n', encoding='utf-8')
     lookup_temp.replace(lookup)
-    archive = build_archive(previous_archive, old_rows, nvd, feed, records, kev, debian, news)
+    archive = build_archive(previous_archive, old_rows, nvd, feed, records, kev, debian, news, translations)
     write_archive = ROOT / 'cve-archive.json'
     write_archive_temp = write_archive.with_suffix('.tmp')
     write_archive_temp.write_text(json.dumps(archive, ensure_ascii=False, separators=(',', ':')) + '\n', encoding='utf-8')

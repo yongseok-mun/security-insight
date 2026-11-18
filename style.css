@@ -418,3 +418,12 @@ dialog code { overflow-wrap: anywhere; }
 #asset-table th:first-child { width:16%; }
 #asset-table th:last-child { width:28%; }
 .asset-pager button:disabled, #asset-download:disabled { opacity:.5; cursor:default; }
+
+.page-heading { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; }
+#asset-cve-query { min-height:36px; max-width:100%; margin:5px 0; padding:5px 8px; background:var(--surface); border:1px solid var(--line); border-radius:5px; }
+.asset-candidates { display:grid; max-height:min(42dvh,360px); overflow:auto; margin:6px 0; border:1px solid var(--line); border-radius:5px; }
+.asset-candidates label { display:flex; align-items:flex-start; gap:7px; padding:7px; border-bottom:1px solid var(--line); overflow-wrap:anywhere; }
+.asset-candidates > p { margin:7px; }
+.asset-selection { align-items:center; margin-top:8px; }
+#asset-cve-selection { overflow-wrap:anywhere; }
+#asset-table .asset-multi-table { min-width:780px; }

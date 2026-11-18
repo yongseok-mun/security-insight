@@ -962,8 +962,10 @@ const assetConditions = {
 };
 const assetValue = (mapping, value) => Object.keys(mapping).find((key) => mapping[key].includes(assetName(value))) || '';
 const assetExposureLabels = {yes:'외부 노출', no:'내부 전용', '':'미확인'};
+const multiAssetLabels = {...batchLabels, not_comparable:'대조 불가'};
+const assetExposureOrder = {yes:0, no:1, '':2};
 
-function compareAssetRows(records, products, item, mapping) {
+function compareAssetRows(records, products, item, mapping, multiple = false) {
   const names = products.map((product) => new Set([
     [compareProductLabel(product, item.product), ...(product.programFiles || [])].join(' · '),
     ...(!product.platforms?.length && !product.modules?.length && !product.programFiles?.length ? [
@@ -982,22 +984,25 @@ function compareAssetRows(records, products, item, mapping) {
     const exposure = assetValue(assetExposure, value('exposure'));
     const build = mapping.build === '' ? mapping.defaultBuild : assetValue(assetBuild, value('build'));
     const conditions = assetValue(assetConditions, value('conditions'));
-    const row = {number, id:value('assetId') || `CSV ${number}행`,
+    const row = {cve:item.id, number, id:value('assetId') || `CSV ${number}행`,
       product:product ? compareProductLabel(product, item.product) : productName || '미확인',
       version, exposure, source:cnaRecordUrl(item)};
     if (!product || !version || version.length > 100) {
-      return {...row, status:'unknown', versionStatus:'추가 확인 필요', conditionStatus:'판정 전',
+      return {...row, status:multiple && !product ? 'not_comparable' : 'unknown',
+        versionStatus:'추가 확인 필요', conditionStatus:'판정 전',
         reason: !product ? (matches.length > 1 ? '일치하는 공지 제품 범위가 여러 개입니다.'
-          : 'CSV 제품명이 공지의 제품·플랫폼과 일치하는지 확인하세요.')
+          : products.length ? 'CSV 제품명이 공지의 제품·플랫폼과 일치하는지 확인하세요.'
+            : '공지에 자동 대조할 제품·버전 기준이 없습니다.')
           : !version ? '설치 버전이 비어 있습니다.' : '설치 버전이 100자를 초과합니다.'};
     }
     const outcome = installedVersionOutcome(product, version, build, conditions);
     const officialUrl = product.officialTakes?.find(({release}) => release === hotfixInput.exec(version)?.[1].toUpperCase())?.patch.url;
-    return {...row, ...outcome, source:publicUrl(officialUrl) || row.source,
+    const status = multiple && outcome.result?.status === 'unknown' ? 'not_comparable' : outcome.status;
+    return {...row, status, versionStatus:outcome.versionStatus, conditionStatus:outcome.conditionStatus,
+      conditionPending:outcome.result?.status === 'affected' && !conditions,
+      source:publicUrl(officialUrl) || row.source,
       reason:[outcome.result?.reason, outcome.status === 'unknown' && outcome.explanation].filter(Boolean).join(' · ')};
-  }).sort((a, b) =>
-    ['', 'no', 'yes'].indexOf(b.exposure) - ['', 'no', 'yes'].indexOf(a.exposure)
-    || a.number - b.number);
+  });
 }
 
 const assetDialog = $('#asset-dialog');
@@ -1005,6 +1010,11 @@ const assetForm = $('#asset-form');
 const assetFile = $('#asset-file');
 const assetStatus = $('#asset-status');
 const assetResultFilter = $('#asset-result-filter');
+const assetCveFilter = $('#asset-cve-filter');
+const assetPicker = $('#asset-picker');
+const assetQuery = $('#asset-cve-query');
+const assetCandidates = $('#asset-candidates');
+const assetSelectionLimit = 5;
 const assetExternalOnly = $('#asset-external-only');
 const assetPageSize = 50;
 let assetSession;
@@ -1022,11 +1032,66 @@ function resetAssetResult() {
 }
 
 function openAssetCsv(item) {
-  assetSession = {item, products:comparisonProducts(item), results:[]};
+  const multiple = !item;
+  assetSession = {multiple, results:[], targets:item ? [{item, products:comparisonProducts(item)}] : [],
+    candidates:multiple ? [...new Map([...priorities, ...data.cves].map((entry) => [entry.id, entry])).values()] : [],
+    chosen:new Set()};
   resetAssetForm();
-  $('#asset-cve').textContent = item.id;
+  assetPicker.hidden = !multiple;
+  assetForm.hidden = multiple;
+  $('#asset-cve').textContent = item?.id || '';
+  for (const control of assetDialog.querySelectorAll('[data-single-asset]')) control.hidden = multiple;
+  $('#asset-multi-note').hidden = !multiple;
+  if (multiple) {
+    assetQuery.value = '';
+    renderAssetCandidates();
+  }
   assetDialog.showModal();
+  if (multiple) assetQuery.focus();
 }
+
+function updateAssetSelection() {
+  const {chosen} = assetSession;
+  $('#asset-cve-selection').textContent = chosen.size
+    ? `${chosen.size}/${assetSelectionLimit}건 선택 · ${[...chosen].join(', ')}`
+    : `0/${assetSelectionLimit}건 선택`;
+  $('#asset-cve-continue').disabled = !chosen.size;
+  for (const control of assetCandidates.querySelectorAll('input')) {
+    control.disabled = chosen.size >= assetSelectionLimit && !control.checked;
+  }
+}
+
+function renderAssetCandidates() {
+  const query = assetQuery.value.trim();
+  const entries = assetSession.candidates.filter((entry) => !query || cveSearchMatch(entry, query) !== null);
+  const visible = query ? entries : [...entries.filter((entry) => assetSession.chosen.has(entry.id)),
+    ...entries.filter((entry) => !assetSession.chosen.has(entry.id))];
+  assetCandidates.innerHTML = visible.slice(0, 20).map((entry) => `<label>
+    <input type="checkbox" value="${escape(entry.id)}" ${assetSession.chosen.has(entry.id) ? 'checked' : ''}>
+    <span><strong>${escape(entry.id)}</strong> ${escape(entry.titleKo || entry.title)}</span>
+  </label>`).join('') + (visible.length > 20 ? '<p class="feed-note">상위 20건 표시 · 검색으로 범위를 좁힐 수 있습니다.</p>' : '')
+    || '<p class="feed-note">현재 수집 목록에 검색 결과가 없습니다.</p>';
+  updateAssetSelection();
+}
+
+$('#open-multi-asset').addEventListener('click', () => openAssetCsv());
+assetQuery.addEventListener('input', renderAssetCandidates);
+assetCandidates.addEventListener('change', (event) => {
+  if (!event.target.matches('input[type="checkbox"]')) return;
+  const {value, checked} = event.target;
+  if (checked && assetSession.chosen.size < assetSelectionLimit) assetSession.chosen.add(value);
+  else if (!checked) assetSession.chosen.delete(value);
+  updateAssetSelection();
+});
+$('#asset-cve-continue').addEventListener('click', () => {
+  assetSession.targets = assetSession.candidates.filter((item) => assetSession.chosen.has(item.id))
+    .map((item) => ({item, products:comparisonProducts(item)}));
+  if (!assetSession.targets.length) return;
+  $('#asset-cve').textContent = assetSession.targets.map(({item}) => item.id).join(' · ');
+  assetPicker.hidden = true;
+  assetForm.hidden = false;
+  assetFile.focus();
+});
 
 function resetAssetForm() {
   assetForm.reset();
@@ -1039,6 +1104,10 @@ assetDialog.addEventListener('close', () => {
   assetSession = undefined;
   resetAssetForm();
   $('#asset-cve').textContent = '';
+  assetCandidates.replaceChildren();
+  assetQuery.value = '';
+  $('#asset-condition-columns').replaceChildren();
+  assetCveFilter.replaceChildren();
   for (const key of [...Object.keys(assetHeaderAliases), 'singleProduct']) {
     assetForm.elements[key].replaceChildren();
   }
@@ -1051,6 +1120,8 @@ assetFile.addEventListener('change', async () => {
   session.records = undefined;
   resetAssetResult();
   $('#asset-fields').hidden = true;
+  $('#asset-multi-conditions').hidden = true;
+  $('#asset-condition-columns').replaceChildren();
   assetStatus.textContent = '';
   if (!file) return;
   if (file.size > 2 * 1024 * 1024) {
@@ -1063,15 +1134,31 @@ assetFile.addEventListener('change', async () => {
     if (session !== assetSession || assetFile.files[0] !== file) return;
     const {headers, records} = readAssetCsv(bytes);
     session.records = records;
+    const columnOptions = (placeholder) => [new Option(placeholder, ''), ...headers
+      .map((label, index) => new Option(`${index + 1}. ${label.trim() || '이름 없는 열'}`, index))];
     for (const [key, aliases] of Object.entries(assetHeaderAliases)) {
       const control = assetForm.elements[key];
-      control.replaceChildren(new Option(key === 'version' ? '열을 선택하세요' : '연결 안 함', ''),
-        ...headers.map((label, index) => new Option(`${index + 1}. ${label.trim() || '이름 없는 열'}`, index)));
+      control.replaceChildren(...columnOptions(key === 'version' ? '열을 선택하세요' : '연결 안 함'));
       const matches = headers.flatMap((label, index) => aliases.includes(assetName(label)) ? [index] : []);
       control.value = matches.length === 1 ? matches[0] : '';
     }
-    assetForm.elements.singleProduct.replaceChildren(new Option('공지 제품을 선택하세요', ''),
-      ...session.products.map((product, index) => new Option(compareProductLabel(product, session.item.product), index)));
+    if (session.multiple) {
+      const fields = $('#asset-condition-columns');
+      for (const {item} of session.targets) {
+        const label = document.createElement('label');
+        label.textContent = `${item.id} 영향 조건 열`;
+        const select = document.createElement('select');
+        select.dataset.assetConditions = item.id;
+        select.replaceChildren(...columnOptions('연결 안 함'));
+        label.append(select);
+        fields.append(label);
+      }
+      $('#asset-multi-conditions').hidden = false;
+    } else {
+      const [{item, products}] = session.targets;
+      assetForm.elements.singleProduct.replaceChildren(new Option('공지 제품을 선택하세요', ''),
+        ...products.map((product, index) => new Option(compareProductLabel(product, item.product), index)));
+    }
     assetForm.elements.defaultBuild.value = '';
     syncAssetMapping();
     $('#asset-fields').hidden = false;
@@ -1082,9 +1169,12 @@ assetFile.addEventListener('change', async () => {
 });
 
 function syncAssetMapping() {
-  const {product, singleProduct, build, defaultBuild} = assetForm.elements;
-  singleProduct.required = product.value === '';
-  singleProduct.disabled = product.value !== '';
+  const {product, singleProduct, build, defaultBuild, conditions} = assetForm.elements;
+  const multiple = assetSession?.multiple === true;
+  product.required = multiple;
+  singleProduct.required = !multiple && product.value === '';
+  singleProduct.disabled = multiple || product.value !== '';
+  conditions.disabled = multiple;
   defaultBuild.disabled = build.value !== '';
 }
 
@@ -1103,19 +1193,31 @@ assetForm.addEventListener('submit', (event) => {
   if (!session?.records?.length) return;
   const mapping = Object.fromEntries([...Object.keys(assetHeaderAliases), 'singleProduct', 'defaultBuild']
     .map((key) => [key, assetForm.elements[key].value]));
-  const assigned = Object.keys(assetHeaderAliases).map((key) => mapping[key]).filter(Boolean);
+  const conditionColumns = new Map([...assetForm.querySelectorAll('[data-asset-conditions]')]
+    .map((field) => [field.dataset.assetConditions, field.value]));
+  if (session.multiple) mapping.conditions = '';
+  const assigned = [...Object.keys(assetHeaderAliases).map((key) => mapping[key]), ...conditionColumns.values()].filter(Boolean);
   if (new Set(assigned).size !== assigned.length) {
     assetStatus.textContent = 'CSV 열 하나를 두 항목에 연결했습니다. 열 연결을 확인하세요.';
     return;
   }
-  session.results = compareAssetRows(session.records, session.products, session.item, mapping);
+  session.results = session.targets.flatMap(({item, products}) => compareAssetRows(session.records, products, item,
+    session.multiple ? {...mapping, conditions:conditionColumns.get(item.id) || ''} : mapping, session.multiple))
+    .sort((a, b) => assetExposureOrder[a.exposure] - assetExposureOrder[b.exposure] || a.number - b.number);
+  const labels = session.multiple ? multiAssetLabels : batchLabels;
   assetResultFilter.replaceChildren(new Option('전체', ''),
-    ...Object.entries(batchLabels).map(([key, label]) => new Option(label, key)));
+    ...Object.entries(labels).map(([key, label]) => new Option(label, key)));
+  if (session.multiple) assetResultFilter.add(new Option('영향 버전 · 조건 미확인', 'condition_pending'));
+  assetCveFilter.replaceChildren(new Option('모든 CVE', ''),
+    ...session.targets.map(({item}) => new Option(item.id, item.id)));
+  $('#asset-cve-filter-label').hidden = !session.multiple;
   assetExternalOnly.checked = false;
-  const counts = Object.fromEntries(Object.keys(batchLabels).map((key) => [key, 0]));
+  const counts = Object.fromEntries(Object.keys(labels).map((key) => [key, 0]));
   session.results.forEach(({status}) => counts[status]++);
   $('#asset-totals').textContent = [
-    `총 ${session.results.length}행`, ...Object.entries(batchLabels).map(([key,label]) => `${label} ${counts[key]}행`),
+    session.multiple ? `자산 ${session.records.length}행 × CVE ${session.targets.length}건 = ${session.results.length}건`
+      : `총 ${session.results.length}행`,
+    ...Object.entries(labels).map(([key,label]) => `${label} ${counts[key]}${session.multiple ? '건' : '행'}`),
   ].join(' · ');
   assetStatus.textContent = '자산 대조를 완료했습니다.';
   $('#asset-results').hidden = false;
@@ -1125,13 +1227,14 @@ assetForm.addEventListener('submit', (event) => {
 function renderAssetResults() {
   const start = assetPage * assetPageSize;
   const rows = displayedAssets.slice(start, start + assetPageSize);
-  $('#asset-table').innerHTML = rows.length ? `<div class="batch-results"><table>
-    <thead><tr><th scope="col">자산 ID</th><th scope="col">제품 · 설치 버전</th><th scope="col">외부 노출</th>
+  const multiple = assetSession.multiple;
+  $('#asset-table').innerHTML = rows.length ? `<div class="batch-results"><table class="${multiple ? 'asset-multi-table' : ''}">
+    <thead><tr><th scope="col">자산 ID</th>${multiple ? '<th scope="col">CVE</th>' : ''}<th scope="col">제품 · 설치 버전</th><th scope="col">외부 노출</th>
       <th scope="col">판정</th><th scope="col">근거</th></tr></thead><tbody>
     ${rows.map((row) => `<tr><th scope="row">${escape(row.id)}</th>
-      <td>${escape(row.product)}<br>${escape(row.version || '버전 미확인')}</td>
+      ${multiple ? `<td>${escape(row.cve)}</td>` : ''}<td>${escape(row.product)}<br>${escape(row.version || '버전 미확인')}</td>
       <td>${assetExposureLabels[row.exposure]}</td>
-      <td><strong>${batchLabels[row.status]}</strong><br><small>${row.versionStatus} · 조건 ${row.conditionStatus}</small></td>
+      <td><strong>${multiAssetLabels[row.status]}</strong><br><small>${row.versionStatus} · 조건 ${row.conditionStatus}</small></td>
       <td>${escape(row.reason)} ${link(row.source, '원문')}</td></tr>`).join('')}
     </tbody></table></div>` : '<p class="feed-note">선택한 필터에 해당하는 자산이 없습니다.</p>';
   $('#asset-page').textContent = rows.length ? `${start + 1}–${start + rows.length} / ${displayedAssets.length}행` : '0행';
@@ -1141,23 +1244,27 @@ function renderAssetResults() {
 }
 
 function filterAssetResults() {
-  displayedAssets = assetSession.results.filter(({status, exposure}) =>
-    (!assetResultFilter.value || assetResultFilter.value === status) && (!assetExternalOnly.checked || exposure === 'yes'));
+  const result = assetResultFilter.value;
+  displayedAssets = assetSession.results.filter(({cve, status, exposure, conditionPending}) =>
+    (!assetCveFilter.value || assetCveFilter.value === cve)
+    && (!result || (result === 'condition_pending' ? conditionPending : result === status))
+    && (!assetExternalOnly.checked || exposure === 'yes'));
   assetPage = 0;
   renderAssetResults();
 }
 
 assetResultFilter.addEventListener('change', filterAssetResults);
+assetCveFilter.addEventListener('change', filterAssetResults);
 assetExternalOnly.addEventListener('change', filterAssetResults);
 $('#asset-previous').addEventListener('click', () => { assetPage--; renderAssetResults(); });
 $('#asset-next').addEventListener('click', () => { assetPage++; renderAssetResults(); });
 $('#asset-download').addEventListener('click', () => {
-  const id = assetSession.item.id;
+  const filename = assetSession.multiple ? 'security-insight-multi-cve' : assetSession.targets[0].item.id;
   const header = ['CVE', 'CSV 행', '자산 ID', '제품', '설치 버전', '외부 노출', '판정', '버전 판정', '영향 조건', '판정 근거', '출처'];
-  const rows = displayedAssets.map((row) => [id,row.number,row.id,row.product,row.version,assetExposureLabels[row.exposure],
-    batchLabels[row.status],row.versionStatus,row.conditionStatus,row.reason,row.source]);
+  const rows = displayedAssets.map((row) => [row.cve,row.number,row.id,row.product,row.version,assetExposureLabels[row.exposure],
+    multiAssetLabels[row.status],row.versionStatus,row.conditionStatus,row.reason,row.source]);
   const csv = '\uFEFF' + [header, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n') + '\r\n';
-  downloadBlob(new Blob([csv], {type:'text/csv;charset=utf-8'}), `${id}-asset-check.csv`);
+  downloadBlob(new Blob([csv], {type:'text/csv;charset=utf-8'}), `${filename}-asset-check.csv`);
 });
 
 function showInstalledVersionResult(event, item) {
@@ -1492,6 +1599,7 @@ function showPage(name) {
   $('#overview').hidden = page !== 'home';
   $('#feed').hidden = page === 'cve' || page === 'home';
   $('#page-title').textContent = labels[page];
+  $('#open-multi-asset').hidden = !['home', 'cve'].includes(page);
   document.querySelectorAll('[data-page]').forEach((button) => {
     if (button.dataset.page === page) button.setAttribute('aria-current', 'page');
     else button.removeAttribute('aria-current');
@@ -2937,6 +3045,7 @@ function applySnapshot(snapshot) {
   stamp.textContent = date(data.updatedAt);
   updateClock(data.updatedAt);
   $('#open-email').disabled = false;
+  $('#open-multi-asset').disabled = data.cves.length === 0;
   showSourceStatus();
   const products = [...new Set(data.cves.map((item) => item.product).filter(Boolean))].sort();
   $('#product').replaceChildren(new Option('모든 제품', ''), ...products.map((product) => new Option(product, product)));

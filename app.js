@@ -211,15 +211,21 @@ const koreaDay = new Intl.DateTimeFormat('sv-SE', {
   timeZone:'Asia/Seoul', year:'numeric', month:'2-digit', day:'2-digit',
 });
 
+function publicationDate(value) {
+  const stamp = Date.parse(value);
+  if (!Number.isFinite(stamp)) return '';
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : koreaDay.format(stamp);
+}
+
 function briefingPriority(snapshot, isWatched = watched) {
   const asOf = Date.parse(snapshot.updatedAt);
   const endDay = Date.parse(koreaDay.format(asOf));
-  const recent = (value) => {
+  const recent = (value, days = 7) => {
     const stamp = Date.parse(value);
     if (!Number.isFinite(stamp)) return false;
     const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(value);
-    const day = dateOnly ? stamp : Date.parse(koreaDay.format(stamp));
-    return (dateOnly || stamp <= asOf) && day <= endDay && endDay - day < 7 * 86400000;
+    const day = Date.parse(publicationDate(value));
+    return (dateOnly || stamp <= asOf) && day <= endDay && endDay - day < days * 86400000;
   };
   const changed = new Map();
   for (const event of snapshot.history || []) {
@@ -232,17 +238,19 @@ function briefingPriority(snapshot, isWatched = watched) {
     const watchedProduct = isWatched(item);
     const watchChange = watchedProduct ? changed.get(item.id) : undefined;
     const network = cvssMetrics(item).AV === 'N';
-    const rank = newKev ? 0 : watchChange ? 1 : watchedProduct && network ? 2 : 3;
+    const newHighRisk = network && item.cvss >= 9 && recent(item.published, 2);
+    const rank = newKev ? 0 : watchChange ? 1 : newHighRisk ? 2 : watchedProduct && network ? 3 : 4;
     const reasons = [
       newKev ? `최근 KEV 등재 (${item.kevDate.slice(5, 10).replace('-', '.')})` : '',
+      newHighRisk ? `신규 공개 고위험 (${publicationDate(item.published)})` : '',
       watchChange ? '관심 제품의 조치 정보 변경' : watchedProduct ? '관심 제품' : '',
       network ? '네트워크 접근 조건 · 외부 노출 확인' : '',
     ].filter(Boolean);
-    if (!newKev && !watchChange && !(watchedProduct && network)) {
+    if (rank === 4) {
       reasons.unshift(item.kev === true ? '기존 KEV 등재' : '공개 위험 지표 기준');
     }
     const sortDate = newKev ? Date.parse(item.kevDate) : watchChange || 0;
-    return {item, rank, sortDate, watchChange, reason:reasons.join(' · ')};
+    return {item, rank, sortDate, watchChange, newHighRisk, reason:reasons.join(' · ')};
   }).sort((a, b) => a.rank - b.rank || b.sortDate - a.sortDate
     || Number(b.item.kev === true) - Number(a.item.kev === true)
     || (b.item.cvss ?? -1) - (a.item.cvss ?? -1)
@@ -250,9 +258,14 @@ function briefingPriority(snapshot, isWatched = watched) {
       - (a.item.epssStatus !== 'stale' ? a.item.epss?.score ?? -1 : -1)
     || newest(a.item, b.item));
   const top = ranked.slice(0, 3);
-  const watchedChange = ranked.find((entry) => entry.watchChange);
-  if (watchedChange && !top.some((entry) => entry.watchChange)) top[top.length - 1] = watchedChange;
-  return top;
+  // Keep the lead item and make room for a watched change and a new high-risk publication when present.
+  for (const key of ['watchChange', 'newHighRisk']) {
+    if (top.some((entry) => entry[key])) continue;
+    const candidate = ranked.find((entry) => entry[key]);
+    const replace = top.findLastIndex((entry, index) => index > 0 && !entry.watchChange && !entry.newHighRisk);
+    if (candidate && replace !== -1) top[replace] = candidate;
+  }
+  return ranked.filter((entry) => top.includes(entry));
 }
 
 function updatePriorities() {
@@ -269,6 +282,13 @@ function renderPriority() {
   panel.hidden = true;
   $('#priority').append(panel);
   $('#priority').hidden = page !== 'home' || priorities.length === 0;
+  const asOf = $('#priority-as-of');
+  asOf.hidden = !data.updatedAt;
+  if (data.updatedAt) {
+    const time = asOf.querySelector('time');
+    time.dateTime = data.updatedAt;
+    time.textContent = date(data.updatedAt);
+  }
   $('#priority-list').innerHTML = priorities.map((entry) => `
     <li><button type="button" class="priority-row" data-cve="${escape(entry.id)}"
       aria-expanded="${entry === item}" aria-controls="priority-inspector">
@@ -325,12 +345,16 @@ function renderRows() {
 
   $('#rows').innerHTML = records.map((item) => {
     const active = item === selected;
+    const published = publicationDate(item.published);
     const sourceMatch = cveSearchMatch(item, $('#query').value);
     const severity = item.cvss >= 9 ? 'critical' : item.cvss >= 7 ? 'high' : item.cvss >= 4 ? 'medium' : '';
     return `<li>
       <button class="cve-row" type="button" data-id="${escape(item.id)}"
         aria-expanded="${active}" ${active ? 'aria-controls="inspector"' : ''}>
-        <span class="cve-id">${escape(item.id)}</span>
+        <span class="cve-identity">
+          <span class="cve-id">${escape(item.id)}</span>
+          <span class="cve-published">발표일 ${published ? `<time datetime="${escape(item.published)}">${escape(published)}</time>` : '미확인'}</span>
+        </span>
         <span class="cve-description"><strong>${escape(item.title)}</strong>${item.product ? `<small>${escape(item.product)}</small>` : ''}</span>
         <span class="cve-meta">
           ${sourceMatch ? `<span class="pill">${escape(sourceMatch)}</span>` : ''}
@@ -340,7 +364,6 @@ function renderRows() {
           ${item.fixes.length ? '<span class="pill fix">수정 버전</span>' : ''}
           ${reviewState(item) !== 'unreviewed' ? reviewBadge(item) : ''}
           ${view === 'epss' ? `<span class="pill">EPSS ${epss(item)}</span>` : ''}
-          ${item.published ? `<time datetime="${escape(item.published)}">${escape(date(item.published))}</time>` : ''}
         </span>
       </button>
     </li>`;
@@ -3072,18 +3095,30 @@ function receiveSnapshot(snapshot, manual) {
   if (!Number.isFinite(incoming)) throw Error('Invalid snapshot timestamp');
   const newestKnown = pendingSnapshot?.updatedAt || data.updatedAt;
   if (newestKnown && incoming <= Date.parse(newestKnown)) {
-    if (pendingSnapshot) showPendingUpdate();
-    else if (manual) note.textContent = '현재 최신 데이터를 보고 있습니다.';
+    if (pendingSnapshot && !updateIsDisruptive()) applyPendingSnapshot();
+    else if (pendingSnapshot) showPendingUpdate();
+    else if (manual) note.textContent = '현재 게시된 최신 데이터를 보고 있습니다.';
     return;
   }
   const alreadyLoaded = Boolean(data.updatedAt);
-  if (alreadyLoaded && (pendingSnapshot || updateIsDisruptive())) {
+  if (alreadyLoaded && updateIsDisruptive()) {
     pendingSnapshot = snapshot;
     showPendingUpdate();
     return;
   }
+  pendingSnapshot = undefined;
   applySnapshot(snapshot);
+  showPendingUpdate();
   if (manual || alreadyLoaded) note.textContent = '새 데이터가 반영됐습니다.';
+}
+
+function applyPendingSnapshot() {
+  if (!pendingSnapshot || $('dialog[open]')) return;
+  const snapshot = pendingSnapshot;
+  pendingSnapshot = undefined;
+  applySnapshot(snapshot);
+  showPendingUpdate();
+  $('#refresh-note').textContent = '새 데이터가 반영됐습니다.';
 }
 
 async function load(manual = false) {
@@ -3109,10 +3144,7 @@ async function load(manual = false) {
 
 $('#apply-update').addEventListener('click', () => {
   if (!pendingSnapshot || $('dialog[open]')) return;
-  applySnapshot(pendingSnapshot);
-  pendingSnapshot = undefined;
-  showPendingUpdate();
-  $('#refresh-note').textContent = '새 데이터가 반영됐습니다.';
+  applyPendingSnapshot();
   $('#refresh-data').focus();
 });
 $('#refresh-data').addEventListener('click', () => load(true));

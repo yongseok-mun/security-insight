@@ -58,7 +58,9 @@ const cveUrl = (id) => {
 };
 let data = {cves:[], news:[], sources:{}};
 let selected;
-let archiveMatch;
+let archiveResults = [];
+let archiveQuery = '';
+const comparisonWork = new Map();
 let archivePromise;
 let priorities = [];
 let priorityReasons = new Map();
@@ -172,23 +174,35 @@ function reviewBadge(item) {
   return `<span class="pill review-badge review-${state}">${reviewLabels[state]}</span>`;
 }
 
+function cveSearchMatch(item, query) {
+  const terms = normalizeProduct(query).split(' ').filter(Boolean);
+  const matches = (values) => {
+    const text = normalizeProduct(values.filter(Boolean).join(' '));
+    return terms.every((term) => text.includes(term));
+  };
+  if (matches([item.id, item.title, item.product, ...(item.fixes || []), item.description])) return '';
+  if (matches((item.officialPatches || []).map(({product}) => product))) return 'KISA 제품명 일치';
+  if (matches((item.cna?.affected || []).flatMap(({vendor, product}) => [vendor, product]))) return 'CNA 제품명 일치';
+  if (matches([item.titleKo, item.descriptionKo])) return '한국어 설명 일치';
+  if (matchesProduct(item, query)) return '제품명·별칭 일치';
+  return null;
+}
+
 function rowsForFilters() {
-  const terms = $('#query').value.trim().toLowerCase().split(/\s+/).filter(Boolean);
-  if (terms.length === 1 && archiveMatch?.id.toLowerCase() === terms[0]
-    && !data.cves.some((item) => item.id === archiveMatch.id)) return [archiveMatch];
+  const query = $('#query').value.trim();
   const product = $('#product').value;
-  const rows = data.cves.filter((item) => {
-    const text = [item.id, item.title, item.product, ...item.fixes, item.description].join(' ').toLowerCase();
-    return terms.every((term) => text.includes(term)) && (!product || item.product === product)
-      && (view !== 'watch' || watched(item))
-      && (view !== 'recheck' || reviewState(item) === 'recheck')
-      && (view !== 'kev' || item.kev === true)
-      && (view !== 'critical' || item.cvss >= 9)
-      && (view !== 'epss' || item.epss != null);
-  });
-  if (view === 'epss') return rows.sort((a, b) => b.epss.score - a.epss.score || newest(a, b));
-  if (view === 'kev') return rows.sort((a, b) => (b.kevDate || '').localeCompare(a.kevDate || '') || newest(a, b));
-  return rows.sort(newest);
+  const include = (item) => cveSearchMatch(item, query) !== null
+    && (!product || item.product === product)
+    && (view !== 'watch' || watched(item))
+    && (view !== 'recheck' || reviewState(item) === 'recheck')
+    && (view !== 'kev' || item.kev === true)
+    && (view !== 'critical' || item.cvss >= 9)
+    && (view !== 'epss' || item.epss != null);
+  const rows = data.cves.filter(include);
+  const results = rows.length || query !== archiveQuery ? rows : archiveResults.filter(include);
+  if (view === 'epss') return results.sort((a, b) => b.epss.score - a.epss.score || newest(a, b));
+  if (view === 'kev') return results.sort((a, b) => (b.kevDate || '').localeCompare(a.kevDate || '') || newest(a, b));
+  return results.sort(newest);
 }
 
 const koreaDay = new Intl.DateTimeFormat('sv-SE', {
@@ -247,6 +261,7 @@ function updatePriorities() {
 
 function renderPriority() {
   const panel = $('#priority-inspector');
+  rememberComparisons('#priority-inspector');
   const item = priorities.find((entry) => entry.id === prioritySelection);
   prioritySelection = item?.id || null;
   panel.hidden = true;
@@ -268,6 +283,7 @@ function renderPriority() {
     renderInspector(panel, item);
     $('#priority-list [aria-expanded="true"]').after(panel);
     panel.hidden = false;
+    attachComparisons('#priority-inspector', item);
   }
 }
 
@@ -301,11 +317,13 @@ function renderRows() {
   const records = rowsForFilters();
   if (!records.includes(selected)) selected = null;
   const inspector = $('#inspector');
+  rememberComparisons('#inspector');
   inspector.hidden = true;
   $('#cve-view').append(inspector);
 
   $('#rows').innerHTML = records.map((item) => {
     const active = item === selected;
+    const sourceMatch = cveSearchMatch(item, $('#query').value);
     const severity = item.cvss >= 9 ? 'critical' : item.cvss >= 7 ? 'high' : item.cvss >= 4 ? 'medium' : '';
     return `<li>
       <button class="cve-row" type="button" data-id="${escape(item.id)}"
@@ -313,6 +331,8 @@ function renderRows() {
         <span class="cve-id">${escape(item.id)}</span>
         <span class="cve-description"><strong>${escape(item.title)}</strong>${item.product ? `<small>${escape(item.product)}</small>` : ''}</span>
         <span class="cve-meta">
+          ${sourceMatch ? `<span class="pill">${escape(sourceMatch)}</span>` : ''}
+          ${archiveResults.includes(item) ? '<span class="pill">보관 자료</span>' : ''}
           <span class="pill ${severity}">CVSS ${cvss(item)}</span>
           ${item.kev === true ? '<span class="pill kev">KEV</span>' : ''}
           ${item.fixes.length ? '<span class="pill fix">수정 버전</span>' : ''}
@@ -322,7 +342,9 @@ function renderRows() {
         </span>
       </button>
     </li>`;
-  }).join('') || '<li class="empty">조건에 맞는 CVE가 없습니다.</li>';
+  }).join('') || `<li class="empty">조건에 맞는 CVE가 없습니다.
+    ${$('#query').value.trim() && $('#query').value.trim() !== archiveQuery ?
+      '<button type="button" class="outline" data-search-archive>보관 자료 검색</button>' : ''}</li>`;
 
   $('#count').textContent = `총 ${records.length}건`;
   document.querySelectorAll('[data-view]').forEach((button) => {
@@ -332,6 +354,7 @@ function renderRows() {
     renderInspector();
     $('#rows [aria-expanded="true"]').after(inspector);
     inspector.hidden = false;
+    attachComparisons('#inspector', selected);
   }
 }
 
@@ -621,7 +644,7 @@ function installedVersionCheck(item) {
       <summary>설치 버전·영향 조건 대조</summary>
       ${products.length ? `
       <form data-version-check>
-        <p class="version-hint">입력값은 이 화면에서만 사용합니다. 제품과 설치 버전은 공지에 쓰인 형식으로 입력하세요.
+        <p class="version-hint">입력값은 현재 브라우저 탭에서만 유지됩니다. 제품과 설치 버전은 공지에 쓰인 형식으로 입력하세요.
           ${products.some((product) => product.officialTakes || checkpointHotfixRanges(product).length) ? ' Check Point Jumbo Hotfix 대상은 릴리스와 Take를 함께 입력하세요. 예: R82.10 Take 50' : ''}</p>
         <label class="batch-toggle"><input type="checkbox" name="batch"> 여러 버전 일괄 대조</label>
         <div class="version-fields">
@@ -746,11 +769,15 @@ function installedVersionOutcome(product, version, build, conditions) {
     headline = '공지상 영향 조건에 해당';
     explanation = '확인한 조건과 설치 버전을 기준으로 패치 또는 완화조치를 검토하세요.';
   } else if (result.status === 'affected' && !conditions) {
-    explanation = '설치 버전이 공지의 영향 범위에 해당합니다. 악용 전제조건을 확인하세요.';
+    headline = '설치 버전은 영향 범위에 해당';
+    explanation = '악용 전제조건을 확인하세요.';
   } else if (result.status === 'affected' && conditions === 'not-met') {
-    explanation = '버전은 영향 범위에 해당합니다. 확인한 필수 조건과 다른 악용 경로가 있는지 공지에서 다시 대조하세요.';
+    headline = '설치 버전은 영향 범위에 해당';
+    explanation = '확인한 필수 조건과 다른 악용 경로가 있는지 공지에서 다시 대조하세요.';
   }
-  return {status, headline, explanation, result};
+  const versionStatus = {fixed:'공식 해결 기준 충족', affected:'영향 범위 해당', unaffected:'공지상 영향 없음'}[result?.status] || '추가 확인 필요';
+  const conditionStatus = {met:'해당으로 입력', 'not-met':'해당하지 않음으로 입력'}[conditions] || '확인 전';
+  return {status, headline, explanation, result, versionStatus, conditionStatus};
 }
 
 const batchLabels = {fixed:'공식 해결 기준 충족', affected:'영향 범위 해당', unaffected:'공지상 영향 없음', unknown:'추가 확인 필요'};
@@ -815,7 +842,7 @@ function downloadBatchCsv(button, item) {
   const rows = [...form.querySelectorAll('[data-version-status]:not([hidden])')];
   if (!product || !rows.length) return;
   const vendors = advisoryReferences(item);
-  const header = ['CVE', '제품', '설치 버전', '판정', '판정 근거', 'CNA 출처', '벤더 공지·패치 참고'];
+  const header = ['CVE', '제품', '설치 버전', '버전 판정', '악용 조건', '판정 근거', 'CNA 출처', '벤더 공지·패치 참고'];
   const body = rows.map((row) => [
     item.id, compareProductLabel(product, item.product), ...[...row.cells].map((cell) => cell.textContent.trim()),
     cnaRecordUrl(item), vendors.join(' '),
@@ -852,15 +879,22 @@ function renderInstalledVersionResult(form, item) {
     product.modules?.length ? `구성요소 · ${product.modules.join(', ')}` : '',
     ...attackConditions(item),
   ].filter(Boolean);
-  const patches = product.officialTakes ? product.officialTakes.map(({patch}) => ({
-    version:patch.fixed, source:'KISA 보호나라', url:patch.url, text:`${patch.product} · 영향 ${patch.affected} / 해결 ${patch.fixed}`,
-  })) : patchRecords(item).filter((patch) => patchProduct(item, patch) === product);
+  const releases = new Set(versions.map((version) => hotfixInput.exec(version)?.[1].toUpperCase()).filter(Boolean));
+  const officialEvidence = (entries) => entries.map(({patch}) => ({
+    version:patch.fixed + (patch.fresh ? '' : ' · 이전 수집'),
+    source:'KISA 보호나라', url:patch.url, text:`${patch.product} · 영향 ${patch.affected} / 해결 ${patch.fixed}`,
+  }));
+  const patches = product.officialTakes ? officialEvidence(product.officialTakes.filter(({release}) => releases.has(release)))
+    : patchRecords(item).filter((patch) => patchProduct(item, patch) === product);
+  const otherPatches = product.officialTakes && officialEvidence(product.officialTakes.filter(({release}) => !releases.has(release)));
+  const otherReleaseEvidence = otherPatches?.length
+    ? `<details><summary>다른 릴리스 기준 보기</summary>${patchEvidenceDetails(otherPatches)}</details>` : '';
   const fixNote = patches.length ? [...new Set(patches.map(({version}) => version))].join(', ')
     : '선택한 제품의 수정 버전 미확인 · 벤더 공지 참조';
   if (batch) {
     const counts = Object.entries(batchLabels).map(([status, label]) =>
       `${label} ${results.filter((entry) => entry.status === status).length}건`).join(' · ');
-    output.dataset.summary = [counts, ...results.map(({version, status}) => `${version} · ${batchLabels[status]}`),
+    output.dataset.summary = [counts, ...results.map(({version, versionStatus, conditionStatus}) => `${version} · 버전 ${versionStatus} · 악용 조건 ${conditionStatus}`),
       `수정 정보 · ${fixNote}`].join('\n');
     output.innerHTML = `<p>${escape(counts)}</p>
       <label>결과 필터 <select data-batch-filter>
@@ -868,26 +902,26 @@ function renderInstalledVersionResult(form, item) {
         ${Object.entries(batchLabels).map(([status, label]) => `<option value="${status}">${label}</option>`).join('')}
       </select></label>
       <button type="button" class="outline" data-export-batch>현재 결과 CSV 다운로드</button>
-      <div class="batch-results"><table><thead><tr><th scope="col">설치 버전</th><th scope="col">대조 결과</th><th scope="col">판단 근거</th></tr></thead>
-      <tbody>${results.map(({version, status, result, explanation}) => `<tr data-version-status="${status}">
-        <th scope="row">${escape(version)}</th><td>${batchLabels[status]}</td>
+      <div class="batch-results"><table><thead><tr><th scope="col">설치 버전</th><th scope="col">버전 판정</th><th scope="col">악용 조건</th><th scope="col">판단 근거</th></tr></thead>
+      <tbody>${results.map(({version, status, result, explanation, versionStatus, conditionStatus}) => `<tr data-version-status="${status}">
+        <th scope="row">${escape(version)}</th><td>${versionStatus}</td><td>${conditionStatus}</td>
         <td>${escape(result?.reason || explanation)}</td></tr>`).join('')}</tbody></table></div>
       <p data-batch-empty hidden>이 조건에 해당하는 버전이 없습니다.</p>
-      <p>수정 정보 · ${escape(fixNote)}</p>${patchEvidenceDetails(patches)}`;
+      <p>수정 정보 · ${escape(fixNote)}</p>${patchEvidenceDetails(patches)}${otherReleaseEvidence}`;
     return;
   }
-  const [{version, headline, explanation, result}] = results;
-  output.dataset.summary = [`입력 버전: ${version}`, headline, explanation, result && `버전 근거 · ${result.reason}`,
+  const [{version, headline, explanation, result, versionStatus, conditionStatus}] = results;
+  output.dataset.summary = [`입력 버전: ${version}`, headline, `설치 버전 판정 · ${versionStatus}`, `악용 조건 · ${conditionStatus}`, explanation, result && `버전 근거 · ${result.reason}`,
     conditionNotes.length && `제품·CVSS 참고 조건 · ${conditionNotes.join(' / ')}`, `수정 정보 · ${fixNote}`].filter(Boolean).join('\n');
   output.innerHTML = `
-    <strong>${headline}</strong><p>${explanation}</p>
+    <strong>${headline}</strong><p>설치 버전 판정 · ${versionStatus}<br>악용 조건 · ${conditionStatus}</p><p>${explanation}</p>
     ${result ? `<p>버전 근거 · ${escape(result.reason)}</p>` : ''}
     ${result?.status === 'unknown' && product.versions?.length ? `<details>
       <summary>CNA 버전 범위 직접 대조</summary>
       <ul class="detail-list">${product.versions.map((entry) => `<li>${escape(versionLabel(entry))}</li>`).join('')}</ul>
     </details>` : ''}
     ${conditionNotes.length ? `<p>제품·CVSS 참고 조건 · ${escape(conditionNotes.join(' / '))}</p>` : ''}
-    <p>수정 정보 · ${escape(fixNote)}</p>${patchEvidenceDetails(patches)}`;
+    <p>수정 정보 · ${escape(fixNote)}</p>${patchEvidenceDetails(patches)}${otherReleaseEvidence}`;
 }
 
 function bilingual(item) {
@@ -1133,8 +1167,15 @@ function showPage(name) {
   if (name !== 'cve' && new URL(location.href).searchParams.has('cve')) {
     history.replaceState(null, '', location.pathname);
   }
-  if (page !== name) $('#feed').replaceChildren();
+  const switched = page !== name;
+  if (switched) {
+    rememberComparisons('#inspector');
+    rememberComparisons('#priority-inspector');
+    $('#feed').replaceChildren();
+  }
   page = name;
+  if (switched && page === 'home') renderPriority();
+  if (switched && page === 'cve') renderRows();
   $('#priority').hidden = page !== 'home' || priorities.length === 0;
   $('#cve-view').hidden = page !== 'cve';
   $('#overview').hidden = page !== 'home';
@@ -1411,22 +1452,29 @@ function showGuide(item, mode) {
 }
 
 function selectItem(id) {
-  selected = data.cves.find((item) => item.id === id) || (archiveMatch?.id === id ? archiveMatch : null);
+  selected = data.cves.find((item) => item.id === id) || (archiveQuery === $('#query').value.trim() ? archiveResults.find((item) => item.id === id) : null);
   renderRows();
 }
 
 $('#filters').addEventListener('submit', (event) => {
   event.preventDefault();
-  searchArchivedCve($('#query').value.trim().toUpperCase());
+  searchArchivedCve($('#query').value.trim());
 });
 $('#filters').addEventListener('input', () => {
   $('#cve-link-status').hidden = true;
   const id = $('#query').value.trim().toUpperCase();
-  if (archiveMatch?.id !== id) archiveMatch = undefined;
+  if (archiveQuery !== $('#query').value.trim()) {
+    archiveQuery = '';
+    archiveResults = [];
+  }
   renderRows();
   if (/^CVE-\d{4}-\d{4,}$/.test(id) && !data.cves.some((item) => item.id === id)) searchArchivedCve(id);
 });
 $('#rows').addEventListener('click', (event) => {
+  if (event.target.closest('[data-search-archive]')) {
+    searchArchivedCve($('#query').value.trim(), true);
+    return;
+  }
   const button = event.target.closest('.cve-row');
   if (!button) return;
   const id = button.dataset.id;
@@ -2267,13 +2315,14 @@ $('#source-alert').addEventListener('click', (event) => {
   if (event.target.closest('[data-source-status]')) $('#source-status').open = true;
 });
 
-async function searchArchivedCve(id, focus = false) {
-  if (!/^CVE-\d{4}-\d{4,}$/.test(id) || data.cves.some((record) => record.id === id)) return;
-  const inSearch = () => page === 'cve' && $('#query').value.trim().toUpperCase() === id;
-  if (!inSearch() || archiveMatch?.id === id) return;
+async function searchArchivedCve(query, focus = false) {
+  if (!normalizeProduct(query) || rowsForFilters().some((item) => data.cves.includes(item))) return;
+  const id = /^CVE-\d{4}-\d{4,}$/i.test(query) ? query.toUpperCase() : '';
+  const inSearch = () => page === 'cve' && $('#query').value.trim().toUpperCase() === query.toUpperCase();
+  if (!inSearch()) return;
   const status = $('#cve-link-status');
   status.hidden = false;
-  status.textContent = '브리핑 밖의 보관 CVE를 조회하고 있습니다.';
+  status.textContent = '보관 CVE를 조회하고 있습니다.';
   try {
     if (!archivePromise) {
       archivePromise = fetch('./cve-archive.json', {cache:'no-cache'}).then((response) => {
@@ -2284,20 +2333,32 @@ async function searchArchivedCve(id, focus = false) {
         throw error;
       });
     }
-    const archive = await archivePromise;
-    if (!inSearch()) return;
-    if (archive[id]) {
-      archiveMatch = archive[id];
-      status.textContent = '보관 자료 · 최신 조치 상태는 공식 원문에서 확인하세요.';
-      selectItem(id);
-      if (focus) $('#inspector h2')?.focus();
+    const request = archivePromise;
+    const archive = await request;
+    if (!inSearch() || request !== archivePromise) return;
+    const listed = new Set(data.cves.map((item) => item.id));
+    archiveQuery = $('#query').value.trim();
+    const currentId = selected?.id;
+    archiveResults = (id ? [archive[id]].filter(Boolean) : Object.values(archive).filter((item) =>
+      !listed.has(item.id) && cveSearchMatch(item, query) !== null)).sort(newest).slice(0, 50);
+    if (currentId) selectItem(currentId);
+    else renderRows();
+    const visible = rowsForFilters();
+    if (visible.length) {
+      status.textContent = `보관 자료 ${visible.length}건${archiveResults.length === 50 ? ' · 최대 50건 표시' : ''} · 최신 조치는 공식 원문에서 확인하세요.`;
+      if (id) {
+        selectItem(id);
+        if (focus) $('#inspector h2')?.focus();
+      } else if (focus) $('#rows .cve-row')?.focus();
       return;
     }
-    status.innerHTML = `<strong>${escape(id)}</strong> 공개 목록과 보관 자료에 없습니다.
-      ${link(cnaRecordUrl({id}), 'CVE 공식 기록')} ${link(nvdRecordUrl({id}), 'NVD')}`;
+    status.innerHTML = id && !archiveResults.length
+      ? `<strong>${escape(id)}</strong> 공개 목록과 보관 자료에 없습니다. ${link(cnaRecordUrl({id}), 'CVE 공식 기록')} ${link(nvdRecordUrl({id}), 'NVD')}`
+      : '현재 검색·필터 조건에 맞는 보관 CVE가 없습니다.';
   } catch {
     if (!inSearch()) return;
-    status.innerHTML = `보관 자료를 읽지 못했습니다. ${link(cnaRecordUrl({id}), 'CVE 공식 기록')} ${link(nvdRecordUrl({id}), 'NVD')}`;
+    status.textContent = '보관 자료를 읽지 못했습니다. 잠시 뒤 다시 검색하세요.';
+    renderRows();
   }
 }
 
@@ -2367,11 +2428,21 @@ function restoreComparisons(panelSelector, comparisons, item) {
   }
 }
 
+function rememberComparisons(panelSelector) {
+  const panel = $(panelSelector);
+  const id = panel.dataset.comparisonCve;
+  const states = captureComparisons(panelSelector);
+  if (id && states.length) comparisonWork.set(id, states);
+}
+
+function attachComparisons(panelSelector, item) {
+  $(panelSelector).dataset.comparisonCve = item.id;
+  restoreComparisons(panelSelector, comparisonWork.get(item.id) || [], item);
+}
+
 function rerankWatchedPriorities() {
-  const comparisons = captureComparisons('#priority-inspector');
   updatePriorities();
   renderPriority();
-  restoreComparisons('#priority-inspector', comparisons, priorities.find(({id}) => id === prioritySelection));
 }
 
 function updateIsDisruptive() {
@@ -2393,15 +2464,16 @@ function applySnapshot(snapshot) {
   const alreadyLoaded = Boolean(data.updatedAt);
   const currentSelection = selected?.id;
   const briefingSelection = prioritySelection;
-  const cveComparisons = captureComparisons('#inspector');
-  const priorityComparisons = captureComparisons('#priority-inspector');
+  rememberComparisons('#inspector');
+  rememberComparisons('#priority-inspector');
+  const priorityComparisons = comparisonWork.get(briefingSelection) || [];
   const watchDraft = $('#watch-name')?.value;
   const currentProduct = $('#product').value;
 
   data = snapshot;
   debianLookupPromise = undefined;
   archivePromise = undefined;
-  selected = data.cves.find((item) => item.id === currentSelection) || (archiveMatch?.id === currentSelection ? archiveMatch : null);
+  selected = data.cves.find((item) => item.id === currentSelection) || archiveResults.find((item) => item.id === currentSelection) || null;
   updatePriorities();
   const stamp = $('#freshness');
   stamp.dateTime = data.updatedAt;
@@ -2414,19 +2486,17 @@ function applySnapshot(snapshot) {
   if (products.includes(currentProduct)) $('#product').value = currentProduct;
   renderPriority();
   renderRows();
-  restoreComparisons('#inspector', cveComparisons, selected);
-  restoreComparisons('#priority-inspector', priorityComparisons, priorities.find(({id}) => id === prioritySelection));
   if (!alreadyLoaded && incomingCve) openIncomingCve(incomingCve);
   else if (page === 'home') {
     renderOverview();
     if (watchDraft) $('#watch-name').value = watchDraft;
   } else if (page !== 'cve') renderFeed();
+  else if (archiveQuery && $('#query').value.trim() === archiveQuery) searchArchivedCve(archiveQuery);
 
   if (page === 'home' && briefingSelection && !prioritySelection
     && priorityComparisons.some(({fields}) => fields.length)
     && data.cves.some(({id}) => id === briefingSelection)) {
     openCve(briefingSelection);
-    restoreComparisons('#inspector', priorityComparisons, selected);
   }
 }
 

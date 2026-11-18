@@ -120,7 +120,7 @@ const matchesProduct = (item, product) => {
 const watched = (item) => preferences.products.some((product) => matchesProduct(item, product));
 
 // Keep the existing snapshot order for completion records saved by earlier releases.
-const remediationFields = ['패치 버전', '해결책', '완화책', 'CISA 조치 권고', '영향 버전·조건', 'Debian 수정 패키지'];
+const remediationFields = ['패치 버전', '해결책', '완화책', 'CISA 조치 권고', '영향 버전·조건', 'Debian 수정 패키지', '공식 제품별 패치 기준'];
 
 function remediationValues(item) {
   return [
@@ -130,6 +130,8 @@ function remediationValues(item) {
     item.requiredAction || '',
     item.impactScope || [],
     (item.debianPackages || []).map(({suite, package:pkg, fixed}) => `${suite} / ${pkg} · ${fixed}`).sort(),
+    [...new Set((item.officialPatches || []).map(({product, affected, fixed, url}) =>
+      `${product} · 영향 ${affected} → 해결 ${fixed} · ${url}`))].sort(),
   ];
 }
 
@@ -151,7 +153,7 @@ function reviewState(item) {
 function completedRemediation(review) {
   try {
     const snapshot = JSON.parse(review.fingerprint);
-    if (Array.isArray(snapshot) && [4, remediationFields.length].includes(snapshot.length)
+    if (Array.isArray(snapshot) && [4, 6, remediationFields.length].includes(snapshot.length)
       && snapshot.every((values, index) => index === 3 ? typeof values === 'string'
         : Array.isArray(values) && values.every((value) => typeof value === 'string'))) return snapshot;
   } catch { /* Some stored reviews may be missing a readable snapshot. */ }
@@ -161,6 +163,7 @@ function completedRemediation(review) {
 function remediationHasChanges(item, review) {
   const saved = completedRemediation(review);
   return !saved || JSON.stringify(saved) !== JSON.stringify(remediationValues(item).slice(0, saved.length))
+    || (saved.length < remediationFields.length && Boolean(item.officialPatches?.length))
     || remediationSinceReview(item, review).length > 0;
 }
 
@@ -610,7 +613,7 @@ debianDialog.addEventListener('submit', (event) => {
 });
 
 function installedVersionCheck(item) {
-  const products = item.cna?.affected || [];
+  const products = comparisonProducts(item);
   const cnaLink = link(`https://www.cve.org/CVERecord?id=${encodeURIComponent(item.id)}`, 'CNA 원문');
   const vendorLinks = (item.cna?.references || []).map((url) => link(url, '벤더 공지')).filter(Boolean);
   return `
@@ -619,7 +622,7 @@ function installedVersionCheck(item) {
       ${products.length ? `
       <form data-version-check>
         <p class="version-hint">입력값은 이 화면에서만 사용합니다. 제품과 설치 버전은 공지에 쓰인 형식으로 입력하세요.
-          ${products.some((product) => checkpointHotfixRanges(product).length) ? ' Check Point Jumbo Hotfix 대상은 릴리스와 Take를 함께 입력하세요. 예: R82.10 Take 50' : ''}</p>
+          ${products.some((product) => product.officialTakes || checkpointHotfixRanges(product).length) ? ' Check Point Jumbo Hotfix 대상은 릴리스와 Take를 함께 입력하세요. 예: R82.10 Take 50' : ''}</p>
         <label class="batch-toggle"><input type="checkbox" name="batch"> 여러 버전 일괄 대조</label>
         <div class="version-fields">
           <label>공지 제품<select name="product" required>
@@ -659,6 +662,45 @@ function checkpointHotfixRanges(product) {
   });
 }
 
+const kisaAffectedTake = /^(R\d+(?:\.\d+)?) Jumbo Hotfix Take (\d+) 이하$/i;
+const kisaFixedTake = /^(R\d+(?:\.\d+)?) Jumbo Hotfix Take (\d+) 이상$/i;
+
+function comparisonProducts(item) {
+  const products = new Map();
+  for (const patch of item.officialPatches || []) {
+    const affected = kisaAffectedTake.exec(patch.affected);
+    const fixed = kisaFixedTake.exec(patch.fixed);
+    if (!affected || !fixed || affected[1].toUpperCase() !== fixed[1].toUpperCase()
+      || BigInt(affected[2]) >= BigInt(fixed[2])) continue;
+    if (!products.has(patch.product)) products.set(patch.product, []);
+    products.get(patch.product).push({
+      patch, release:affected[1].toUpperCase(), affectedMax:BigInt(affected[2]), fixedMin:BigInt(fixed[2]),
+    });
+  }
+  return [...(item.cna?.affected || []), ...[...products].map(([product, officialTakes]) =>
+    ({product, vendor:'KISA 공지', officialTakes}))];
+}
+
+function evaluateOfficialHotfix(product, version) {
+  const parsed = hotfixInput.exec(version);
+  const release = parsed?.[1].toUpperCase();
+  if (!parsed?.[2]) return {status:'unknown', reason:'설치 릴리스와 Jumbo Hotfix Take를 함께 입력하세요. 예: R82.10 Take 50'};
+  const matches = product.officialTakes.filter((entry) => entry.release === release);
+  if (!matches.length) return {status:'unknown', reason:'선택한 제품의 해당 릴리스는 공식 표에서 확인해 주세요.'};
+  if (matches.some(({patch}) => patch.fresh !== true)) return {status:'unknown', reason:'이전 수집 자료입니다. KISA 원문에서 최신 해결 기준을 확인하세요.'};
+  const take = BigInt(parsed[2]);
+  const candidates = matches.map((entry) => {
+    const {patch, affectedMax, fixedMin} = entry;
+    if (take <= affectedMax) return {status:'affected', reason:patch.affected};
+    if (take >= fixedMin) return {status:'fixed', reason:patch.fixed};
+    return {status:'unknown', reason:`영향 기준 ${patch.affected} / 해결 기준 ${patch.fixed} 사이입니다. 원문 확인이 필요합니다.`};
+  });
+  if (new Set(matches.map(({affectedMax, fixedMin}) => `${affectedMax}/${fixedMin}`)).size > 1) {
+    return {status:'unknown', reason:'같은 제품과 릴리스에 서로 다른 공식 기준이 있습니다. 원문을 직접 확인하세요.'};
+  }
+  return candidates[0];
+}
+
 function evaluateCheckpointHotfix(product, version) {
   const ranges = checkpointHotfixRanges(product);
   if (!ranges.length) return null;
@@ -683,13 +725,18 @@ function evaluateCheckpointHotfix(product, version) {
 
 function installedVersionOutcome(product, version, build, conditions) {
   const upstream = build === 'upstream';
-  const result = upstream ? evaluateCheckpointHotfix(product, version) || evaluateInstalledVersion(product, version) : null;
+  const result = !upstream ? null : product.officialTakes ? evaluateOfficialHotfix(product, version)
+    : evaluateCheckpointHotfix(product, version) || evaluateInstalledVersion(product, version);
   let status = 'unknown';
   let headline = '추가 확인 필요';
   let explanation = '벤더 공지에서 제품 에디션·기능 설정과 영향 조건을 확인하세요.';
   if (!upstream) {
     explanation = '배포판·백포트·자체 빌드는 설치 패키지 릴리스와 해당 공급사의 보안 공지로 확인하세요.';
     if (!build) explanation = '설치 유형을 선택하면 공지 범위와 대조할 수 있습니다.';
+  } else if (result.status === 'fixed') {
+    status = 'fixed';
+    headline = '공식 공지 해결 버전 기준 충족';
+    explanation = '선택한 제품·릴리스의 해결 Take 기준을 충족합니다.';
   } else if (result.status === 'unaffected') {
     status = 'unaffected';
     headline = '공지상 해당 버전은 영향 없음';
@@ -706,7 +753,7 @@ function installedVersionOutcome(product, version, build, conditions) {
   return {status, headline, explanation, result};
 }
 
-const batchLabels = {affected:'영향 범위 해당', unaffected:'공지상 영향 없음', unknown:'추가 확인 필요'};
+const batchLabels = {fixed:'공식 해결 기준 충족', affected:'영향 범위 해당', unaffected:'공지상 영향 없음', unknown:'추가 확인 필요'};
 const cnaRecordUrl = (item) => `https://www.cve.org/CVERecord?id=${encodeURIComponent(item.id)}`;
 const nvdRecordUrl = (item) => `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(item.id)}`;
 const advisoryReferences = (item) => [...new Set([...(item.cna?.references || []), ...(item.references || [])]
@@ -732,8 +779,18 @@ function patchEvidenceDetails(patches) {
     <p>${escape(text)}</p>${link(url, '근거 원문')}</details>`).join('');
 }
 
+function officialPatchEvidence(item) {
+  const rows = item.officialPatches || [];
+  if (!rows.length) return '';
+  return `<details open><summary>KISA 제품별 공식 패치 기준 · ${rows.length}건</summary><ul class="detail-list">
+    ${rows.map(({product,affected,fixed,url,fresh}) => `<li><strong>${escape(product)}</strong> · 영향 ${escape(affected)} → 해결 ${escape(fixed)}${fresh ? '' : ' · 이전 수집'} · ${link(url, '원문')}</li>`).join('')}
+  </ul></details>`;
+}
+
 function groupedPatchEvidence(item) {
   const patches = patchRecords(item);
+  const official = officialPatchEvidence(item);
+  if (!patches.length && official) return official;
   if (!patches.length) return `<p>수집된 수정 버전 미확인 · ${link(cnaRecordUrl(item), 'CNA 원문')}</p>`;
   const groups = new Map();
   for (const patch of patches) {
@@ -742,7 +799,7 @@ function groupedPatchEvidence(item) {
     if (!groups.has(label)) groups.set(label, []);
     groups.get(label).push(patch);
   }
-  return [...groups].map(([label, records]) => `<div class="affected-product">
+  return official + [...groups].map(([label, records]) => `<div class="affected-product">
     <strong>${escape(label)}</strong>${patchEvidenceDetails(records)}</div>`).join('');
 }
 
@@ -754,7 +811,7 @@ function csvCell(value) {
 
 function downloadBatchCsv(button, item) {
   const form = button.closest('[data-version-check]');
-  const product = item?.cna?.affected?.[Number(form.elements.product.value)];
+  const product = item && form.elements.product.value !== '' ? comparisonProducts(item)[Number(form.elements.product.value)] : undefined;
   const rows = [...form.querySelectorAll('[data-version-status]:not([hidden])')];
   if (!product || !rows.length) return;
   const vendors = advisoryReferences(item);
@@ -795,7 +852,9 @@ function renderInstalledVersionResult(form, item) {
     product.modules?.length ? `구성요소 · ${product.modules.join(', ')}` : '',
     ...attackConditions(item),
   ].filter(Boolean);
-  const patches = patchRecords(item).filter((patch) => patchProduct(item, patch) === product);
+  const patches = product.officialTakes ? product.officialTakes.map(({patch}) => ({
+    version:patch.fixed, source:'KISA 보호나라', url:patch.url, text:`${patch.product} · 영향 ${patch.affected} / 해결 ${patch.fixed}`,
+  })) : patchRecords(item).filter((patch) => patchProduct(item, patch) === product);
   const fixNote = patches.length ? [...new Set(patches.map(({version}) => version))].join(', ')
     : '선택한 제품의 수정 버전 미확인 · 벤더 공지 참조';
   if (batch) {
@@ -933,7 +992,7 @@ function actionSummary(item) {
       <dl>
         <div><dt>영향 버전 <small>CNA</small></dt><dd>${visibleRanges || '명시된 영향 버전 미확인. 아래 영향 범위와 공지를 확인하세요.'}${ranges.length > 3 ? `<br><small>외 ${ranges.length - 3}개 범위 · 아래 영향 범위에 전체 표시</small>` : ''}</dd></div>
         <div><dt>성립 조건 <small>CVSS 기준</small></dt><dd>${escape(conditions.length ? conditions.join(' / ') : '구조화된 조건 미확인')}${conditions.length ? '<br><small>제품별 설정·기능 조건은 아래 설명과 원문 참조</small>' : ''}</dd></div>
-        <div><dt>수정 버전</dt><dd>${escape(scopedPatches.length ? scopedPatches.join(' / ') : patches.length ?
+        <div><dt>수정 버전</dt><dd>${item.officialPatches?.length ? 'KISA 제품별 패치 기준 확인 · 아래 패치 근거 참조' : escape(scopedPatches.length ? scopedPatches.join(' / ') : patches.length ?
           '제품·릴리스별 적용 범위 확인 필요 · 아래 패치 근거 참조' : '수정 버전 미확인 · 벤더 공지 참조')}</dd></div>
         <div><dt>첫 점검</dt><dd>${escape(firstCheck)}</dd></div>
       </dl>
@@ -958,7 +1017,8 @@ function remediationComparison(item, review) {
   const rows = completed ? remediationFields.flatMap((field, index) => {
     const latest = events.find((event) => event.changes?.some((change) => change.field === field));
     const earliest = events.findLast((event) => event.changes?.some((change) => change.field === field));
-    const earlier = completed[index] ?? earliest?.changes.find((change) => change.field === field)?.before;
+    const earlier = completed[index] ?? earliest?.changes.find((change) => change.field === field)?.before
+      ?? (field === '공식 제품별 패치 기준' ? [] : undefined);
     if (earlier === undefined || JSON.stringify(earlier) === JSON.stringify(current[index])) return [];
     const values = (value) => (Array.isArray(value) ? value : [value]).filter(Boolean);
     return [{field, before:values(earlier), after:values(current[index]), at:latest?.at}];
@@ -1440,7 +1500,7 @@ function advisoryChanges(comparison) {
 function advisoryTranslationSources(item, comparison) {
   const [, solutions, workarounds, requiredAction] = remediationValues(item);
   const changeText = advisoryChanges(comparison).flatMap(({field, before, after}) =>
-    [0, 4, 5].some((index) => field === remediationFields[index]) ? [] : [...before, ...after]);
+    [0, 4, 5, 6].some((index) => field === remediationFields[index]) ? [] : [...before, ...after]);
   return [...new Set([
     item.titleKo ? '' : item.title,
     item.descriptionKo ? '' : englishDescription(item),
@@ -1534,7 +1594,7 @@ function advisoryText(item, {comparison, version, translations = new Map()} = {}
     if (!completed) changes.push('완료 당시 비교 정보를 확인할 수 없습니다.');
     if (!rows.length && events.length) changes.push('수집된 변경 이력 기준입니다.');
     for (const {field, before, after, at} of advisoryChanges(comparison)) {
-      const value = (entries) => entries.map((entry) => [0, 4, 5].some((index) => field === remediationFields[index]) ? entry
+      const value = (entries) => entries.map((entry) => [0, 4, 5, 6].some((index) => field === remediationFields[index]) ? entry
         : koreanText(entry, translations) || '원문 공지에서 확인').join(' / ') || '기록된 정보 없음';
       changes.push(`- ${field} · 변경 감지 ${at ? date(at) : '시각 미확인'}`,
         `  이전: ${value(before)}`,
@@ -1585,6 +1645,10 @@ function advisoryText(item, {comparison, version, translations = new Map()} = {}
     '',
     '5. 조치 방법(패치·완화·보안장비·접근제어)',
     '- 패치: 대상 제품·릴리스의 수정 버전과 적용 절차를 벤더 공지에서 확인합니다.',
+    ...(item.officialPatches || []).flatMap(({product,affected,fixed,url,fresh}) => [
+      `- ${product} · 영향 ${affected} → 해결 ${fixed}${fresh ? '' : ' (이전 수집 · 최신 원문 확인)'}`,
+      `  KISA 보호나라: ${url}`,
+    ]),
     ...scopedPatches.flatMap((patch) => [
       `- ${compareProductLabel(patchProduct(item, patch), item.product)} · 수정 버전 ${patch.version}`,
       ...(publicUrl(patch.url) ? [`  근거(${patch.source}): ${publicUrl(patch.url)}`] : []),
@@ -1690,8 +1754,13 @@ function advisoryPreflightWarnings(item, text, changed, offline) {
   const writtenVersions = new Set(actionText.split('\n').filter((line) => !line.includes(' · 근거(')
     && /수정 버전|패치|업데이트|업그레이드|upgrade|update/i.test(line))
     .flatMap((line) => line.replace(/https?:\/\/\S+/g, '').match(patchVersionPattern) || []));
-  if (!patches.length) warnings.push('수집된 근거에서 제품·릴리스별 수정 버전을 확인하세요.');
-  else {
+  const official = item.officialPatches || [];
+  if (official.length && official.some(({product, fixed, url}) =>
+    !actionText.split('\n').some((line) => line.includes(product) && line.includes(`해결 ${fixed}`)) || !actionLinks.has(canonical(url)))) {
+    warnings.push('본문의 제품별 공식 해결 기준과 KISA 원문 링크를 확인하세요.');
+  }
+  if (!patches.length && !official.length) warnings.push('수집된 근거에서 제품·릴리스별 수정 버전을 확인하세요.');
+  if (patches.length) {
     const matched = patches.filter(({version}) => writtenVersions.has(version));
     if (!matched.length) warnings.push(`조치 방법 본문에 수집된 수정 버전이 없습니다 · ${[...new Set(patches.map(({version}) => version))].join(', ')}`);
     else if (!matched.some(({url}) => actionLinks.has(canonical(url)))) warnings.push('본문에 적힌 수정 버전과 연결되는 근거 링크를 조치 방법에 추가하세요.');
@@ -1970,7 +2039,7 @@ for (const panel of [$('#inspector'), $('#priority-inspector')]) {
     let visible = 0;
     for (const row of output.querySelectorAll('[data-version-status]')) {
       const status = row.dataset.versionStatus;
-      row.hidden = Boolean(filter) && (filter === 'review' ? status === 'unaffected' : filter !== status);
+      row.hidden = Boolean(filter) && (filter === 'review' ? ['unaffected', 'fixed'].includes(status) : filter !== status);
       if (!row.hidden) visible++;
     }
     output.querySelector('[data-batch-empty]').hidden = visible > 0;

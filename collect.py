@@ -612,6 +612,97 @@ def patch_evidence(item):
     return unique
 
 
+class AdvisoryTable(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.rows = []
+        self.row = None
+        self.cell = None
+        self.columns = None
+        self.table = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag == 'table':
+            self.table = True
+            self.columns = None
+        elif self.table and tag == 'tr':
+            self.row = []
+        elif self.row is not None and tag in ('td', 'th'):
+            self.cell = []
+            if any(key in ('rowspan', 'colspan') and value != '1' for key, value in attrs):
+                self.row.append('')  # Skip merged cells rather than guess their meaning.
+        elif self.cell is not None and tag == 'br':
+            self.cell.append(' ')
+
+    def handle_data(self, data):
+        if self.cell is not None:
+            self.cell.append(data)
+
+    def handle_endtag(self, tag):
+        if tag in ('td', 'th') and self.cell is not None and self.row is not None:
+            self.row.append(' '.join(''.join(self.cell).split()))
+            self.cell = None
+        elif tag == 'tr' and self.row is not None:
+            if len(self.row) == 4:
+                columns = [''.join(value.split()) for value in self.row]
+                required = ('취약점', '제품명', '영향받는버전', '해결버전')
+                if set(columns) == set(required):
+                    self.columns = [columns.index(label) for label in required]
+                elif self.columns:
+                    cve, product, affected, fixed = (self.row[index] for index in self.columns)
+                    if CVE.fullmatch(cve) and all((product, affected, fixed)):
+                        self.rows.append(dict(id=cve.upper(), product=product, affected=affected, fixed=fixed))
+            self.row = None
+            self.cell = None
+        elif tag == 'table':
+            self.table = False
+
+
+def kisa_patch_rows(address):
+    parsed = url.urlsplit(address)
+    if (parsed.scheme != 'https' or parsed.hostname not in {
+        'www.krcert.or.kr', 'krcert.or.kr', 'www.boho.or.kr', 'boho.or.kr'
+    } or parsed.port not in (None, 443) or parsed.path != '/kr/bbs/view.do'):
+        raise ValueError('unexpected KISA advisory address')
+    parser = AdvisoryTable()
+    parser.feed(get(address).decode('utf-8-sig'))
+    parser.close()
+    return parser.rows
+
+
+def enrich_kisa_notices(feeds, previous_feeds):
+    articles = sorted((article for group in feeds.values() for article in group
+                       if article['kind'] == 'advisory' and article.get('date')),
+                      key=lambda article: moment(article['date']), reverse=True)[:12]
+    previous = {article['url']: article.get('officialRows', [])
+                for group in previous_feeds.values() for article in group}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        jobs = {article['url']: pool.submit(kisa_patch_rows, article['url']) for article in articles}
+        for article in articles:
+            address = article['url']
+            try:
+                rows = jobs[address].result()
+            except SOURCE_ERRORS as error:
+                print(f'KISA advisory table: {error}', file=sys.stderr)
+                rows = []
+            article['officialRows'] = rows or previous.get(address, [])
+            article['officialRowsFresh'] = bool(rows)
+            article['cves'] = sorted(set(article['cves']) | {row['id'] for row in article['officialRows']})
+
+
+def apply_official_patches(item, old, news):
+    updated_urls = {article['url'] for article in news if article.get('officialRows')}
+    entries = [{**row, 'fresh':False} for row in old.get('officialPatches', []) if row['url'] not in updated_urls]
+    entries.extend(dict(product=row['product'], affected=row['affected'], fixed=row['fixed'], url=article['url'], fresh=article.get('officialRowsFresh', False))
+                   for article in news for row in article.get('officialRows', [])
+                   if row['id'] == item['id'])
+    unique = {(row['product'], row['affected'], row['fixed'], row['url']):row for row in entries}
+    if unique:
+        item['officialPatches'] = [unique[key] for key in sorted(unique)]
+    else:
+        item.pop('officialPatches', None)
+
+
 def annotate_review_fields(item):
     item['impactScope'] = impact_values(item)
     item['patchEvidence'] = patch_evidence(item)
@@ -634,7 +725,8 @@ def build_archive(previous, prior_active, nvd, feed, active, kev, debian, news, 
     active_ids = {item['id'] for item in active}
     sources = {item['id']: item for item in feed}
     featured_ids = featured_news_cves(news, active_ids)
-    for cve_id in set(nvd) | set(sources) | set(featured_ids):
+    official_ids = {row['id'] for article in news for row in article.get('officialRows', []) if row['id'] in archive}
+    for cve_id in set(nvd) | set(sources) | set(featured_ids) | official_ids:
         record = nvd.get(cve_id, {})
         if record.get('vulnStatus', '').lower() == 'rejected':
             archive.pop(cve_id, None)
@@ -648,6 +740,10 @@ def build_archive(previous, prior_active, nvd, feed, active, kev, debian, news, 
             item['debianPackages'] = debian[cve_id]
         # Keep CNA enrichment for items observed previously in the active list.
         old = archive.get(cve_id) or {}
+        if item['title'] == cve_id and old.get('title'):
+            item['title'] = old['title']
+        if not item['product'] and old.get('product'):
+            item['product'] = old['product']
         for key in ('cna', 'cnaChecked', 'cnaTitle', 'cnaEnglish', 'cnaKorean'):
             if key in old:
                 item[key] = old[key]
@@ -656,6 +752,7 @@ def build_archive(previous, prior_active, nvd, feed, active, kev, debian, news, 
             item['notices'] = [article for article in news if article['kind'] == 'advisory' and cve_id in article['cves']][:3]
             if debian.get(cve_id):
                 item['debianPackages'] = debian[cve_id]
+        apply_official_patches(item, old, news)
         annotate_review_fields(item)
         archive[cve_id] = item
 
@@ -686,6 +783,9 @@ def remediation_values(item):
         '완화책': sorted(set(cna.get('workarounds', []))),
         'CISA 조치 권고': [item['requiredAction']] if item.get('requiredAction') else [],
         '영향 버전·조건': item.get('impactScope') if 'impactScope' in item else impact_values(item),
+        '공식 제품별 패치 기준': sorted(set(
+            f"{row['product']} · 영향 {row['affected']} → 해결 {row['fixed']} · {row['url']}"
+            for row in item.get('officialPatches', []))),
         'Debian 수정 패키지': sorted(
             f"{entry['suite']} / {entry['package']} · {entry['fixed']}" for entry in item.get('debianPackages', [])),
     }
@@ -808,6 +908,7 @@ def collect():
         probability = probability_job.result()
         debian = debian_job.result()
 
+    enrich_kisa_notices(feeds, previous_feeds)
     add_article_images(feeds, previous_feeds)
     news, seen = [], set()
     for article in (a for feed in feeds.values() for a in feed):
@@ -828,6 +929,7 @@ def collect():
     translations = json.loads(translation_file.read_text(encoding='utf-8')) if translation_file.exists() else {}
     records = enrich_cves(records, previous, translations)
     for item in records:
+        apply_official_patches(item, old_rows.get(item['id'], {}), news)
         annotate_review_fields(item)
     lookup = ROOT / 'debian-packages.json'
     lookup_temp = lookup.with_suffix('.tmp')

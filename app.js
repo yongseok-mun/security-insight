@@ -832,7 +832,7 @@ function showInstalledVersionResult(event, item) {
 
 function renderInstalledVersionResult(form, item) {
   const fields = form.elements;
-  const product = item?.cna?.affected?.[Number(fields.product.value)];
+  const product = item && fields.product.value !== '' ? comparisonProducts(item)[Number(fields.product.value)] : undefined;
   if (!product || fields.product.value === '') return;
   const batch = fields.batch.checked;
   const versions = (batch ? fields.versions.value.split(/\r?\n/) : [fields.version.value])

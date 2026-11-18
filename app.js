@@ -234,7 +234,9 @@ function briefingReach(item) {
 
 const briefingConditions = {
   'CVE-2026-114938': {
-    text:'Java4Shell · x86-64 AVX-512 VBMI 및 공격자 입력의 Base64 디코딩 경로 확인',
+    alias:'Java4Shell',
+    environment:'영향받는 Java 런타임에서 x86-64 AVX-512 VBMI 경로를 사용하고, 공격자 입력이 Base64 디코딩에 도달하는 환경',
+    firstCheck:'서비스·컨테이너의 번들 JDK 버전과 CPU의 AVX-512 VBMI 지원 여부를 확인하세요.',
     sources:[
       ['CISA 긴급 패치 권고', 'https://content.govdelivery.com/accounts/USDHSCISA/bulletins/4332a87'],
       ['CSA 제품·악용 조건 안내', 'https://www.csa.gov.sg/alerts-and-advisories/alerts/al-2026-166/'],
@@ -278,7 +280,6 @@ function briefingPriority(snapshot, isWatched = watched) {
       reach ? `범용 구성요소 · ${reach}` : '',
       covered ? [coverage.official ? '공공기관 공지' : '', `최근 보도 ${coverage.publishers}개 매체`].filter(Boolean).join(' · ') : '',
       watchChange ? '관심 제품의 조치 정보 변경' : watchedProduct ? '관심 제품' : '',
-      briefingConditions[item.id]?.text || (network ? '네트워크 접근 조건 · 외부 노출 확인' : ''),
     ].filter(Boolean);
     if (rank === 4) {
       reasons.unshift(item.kev === true ? '기존 KEV 등재' : '공개 위험 지표 기준');
@@ -305,6 +306,24 @@ function briefingPriority(snapshot, isWatched = watched) {
   return ranked.filter((entry) => top.includes(entry));
 }
 
+function cveHeading(item) {
+  const title = item.titleKo || item.title || item.id;
+  const alias = briefingConditions[item.id]?.alias;
+  return alias && !title.toLowerCase().includes(alias.toLowerCase()) ? `${alias} · ${title}` : title;
+}
+
+function firstAssetCheck(item) {
+  const curated = briefingConditions[item.id]?.firstCheck;
+  if (curated) return curated;
+  if ((item.cna?.affected || []).some((product) => checkpointHotfixRanges(product).length)) {
+    return '설치 릴리스와 Jumbo Hotfix Take를 함께 확인하세요.';
+  }
+  const metrics = cvssMetrics(item);
+  if (metrics.AV === 'N') return '영향 버전과 취약 기능의 네트워크 접근 경로를 확인하세요.';
+  if (metrics.AV === 'L') return '영향 버전과 로컬 계정의 접근 권한을 확인하세요.';
+  return '공지를 기준으로 설치 버전과 영향받는 기능의 사용 여부를 확인하세요.';
+}
+
 function updatePriorities() {
   const ranked = briefingPriority(data);
   priorities = ranked.map(({item}) => item);
@@ -329,12 +348,15 @@ function renderPriority() {
   $('#priority-list').innerHTML = priorities.map((entry) => `
     <li><button type="button" class="priority-row" data-cve="${escape(entry.id)}"
       aria-expanded="${entry === item}" aria-controls="priority-inspector">
-      <span class="priority-copy"><span>${escape(entry.id)}</span><strong>${escape(entry.title)}</strong>
-        <small class="priority-reason">${escape(priorityReasons.get(entry.id))}</small></span>
+      <span class="priority-copy">
+        <span class="priority-id">${escape(entry.id)}</span><strong>${escape(cveHeading(entry))}</strong>
+        <span class="priority-line priority-reason"><b>선정 이유</b> ${escape(priorityReasons.get(entry.id))}</span>
+        <span class="priority-line priority-check"><b>첫 점검</b> ${escape(firstAssetCheck(entry))}</span>
+      </span>
       <span class="cve-meta">
         ${entry.kev === true ? '<span class="pill kev">KEV</span>' : ''}
-        <span class="pill">CVSS ${cvss(entry)}</span>
-        <span class="pill">EPSS ${epss(entry)}${entry.epssStatus === 'stale' ? ' · 이전' : ''}</span>
+        <span class="pill">CVSS ${Number.isFinite(entry.cvss) ? cvss(entry) : '미확인'}</span>
+        <span class="pill">EPSS ${entry.epss ? epss(entry) : '미확인'}${entry.epssStatus === 'stale' ? ' · 이전' : ''}</span>
       </span>
       <span class="priority-detail">${entry === item ? '상세 닫기' : '상세 보기'} <span aria-hidden="true">⌄</span></span>
     </button></li>`).join('');
@@ -372,13 +394,29 @@ function updateClock(stamp) {
   clockTimer = setInterval(tick, 1000);
 }
 
+const wideCveLayout = matchMedia('(min-width: 960px)');
+
+function placeCveInspector() {
+  const inspector = $('#inspector');
+  const row = $('#rows [aria-expanded="true"]');
+  const dock = $('#inspector-dock');
+  const destination = row && !wideCveLayout.matches ? row.parentElement : dock;
+  if (inspector.parentElement === destination) return;
+  const focus = inspector.contains(document.activeElement) ? document.activeElement : null;
+  destination.append(inspector);
+  focus?.focus({preventScroll:true});
+}
+
+wideCveLayout.addEventListener('change', placeCveInspector);
+
 function renderRows() {
   const records = rowsForFilters();
   if (!records.includes(selected)) selected = null;
   const inspector = $('#inspector');
   rememberComparisons('#inspector');
   inspector.hidden = true;
-  $('#cve-view').append(inspector);
+  $('#inspector-dock').append(inspector);
+  $('#cve-workbench').classList.toggle('has-selection', Boolean(selected));
 
   $('#rows').innerHTML = records.map((item) => {
     const active = item === selected;
@@ -392,11 +430,11 @@ function renderRows() {
           <span class="cve-id">${escape(item.id)}</span>
           <span class="cve-published">발표일 ${published ? `<time datetime="${escape(item.published)}">${escape(published)}</time>` : '미확인'}</span>
         </span>
-        <span class="cve-description"><strong>${escape(item.title)}</strong>${item.product ? `<small>${escape(item.product)}</small>` : ''}</span>
+        <span class="cve-description"><strong>${escape(cveHeading(item))}</strong>${item.product ? `<small>${escape(item.product)}</small>` : ''}</span>
         <span class="cve-meta">
           ${sourceMatch ? `<span class="pill">${escape(sourceMatch)}</span>` : ''}
           ${archiveResults.includes(item) ? '<span class="pill">보관 자료</span>' : ''}
-          <span class="pill ${severity}">CVSS ${cvss(item)}</span>
+          <span class="pill ${severity}">CVSS ${Number.isFinite(item.cvss) ? cvss(item) : '미확인'}</span>
           ${item.kev === true ? '<span class="pill kev">KEV</span>' : ''}
           ${item.fixes.length ? '<span class="pill fix">수정 버전</span>' : ''}
           ${reviewState(item) !== 'unreviewed' ? reviewBadge(item) : ''}
@@ -413,9 +451,11 @@ function renderRows() {
     button.setAttribute('aria-pressed', String(button.dataset.view === view));
   });
   if (selected) {
+    const changed = inspector.dataset.comparisonCve !== selected.id;
     renderInspector();
-    $('#rows [aria-expanded="true"]').after(inspector);
+    placeCveInspector();
     inspector.hidden = false;
+    if (changed) inspector.scrollTop = 0;
     attachComparisons('#inspector', selected);
   }
 }
@@ -1484,29 +1524,35 @@ function actionSummary(item) {
     const product = patchProduct(item, patch);
     return product ? [`${product.product || item.product} · ${patch.version}`] : [];
   }))];
-  const hotfix = affected.some((product) => checkpointHotfixRanges(product).length);
   const platforms = [...new Set(affected.flatMap((product) => product.platforms || []))];
   const modules = [...new Set(affected.flatMap((product) => product.modules || []))];
-  const firstCheck = [
-    hotfix ? '설치 릴리스와 Jumbo Hotfix Take를 함께 확인하세요.' : '설치 버전·빌드를 영향 범위와 대조하세요.',
-    platforms.length ? `대상 플랫폼 · ${platforms.join(', ')}.` : '',
-    modules.length ? `구성요소 사용 여부 · ${modules.join(', ')}.` : '',
-    conditions.includes('접근 경로 · 네트워크') ? '관리 대상 서비스의 접근 가능 경로도 확인하세요.' : '',
-  ].filter(Boolean).join(' ');
+  const environment = briefingConditions[item.id]?.environment;
+  const filters = [platforms.length ? `대상 플랫폼 · ${platforms.join(', ')}` : '',
+    modules.length ? `구성요소 · ${modules.join(', ')}` : ''].filter(Boolean).join(' / ');
   const visibleRanges = ranges.slice(0, 3).map(escape).join('<br>');
   return `
     <section class="action-summary">
       <h3>조치 요약</h3>
-      ${(item.cna?.references?.[0] || item.references?.[0] || item.notices?.[0]) ? `<p class="action-sources">
-        ${link(item.cna?.references?.[0] || item.references?.[0], '벤더 공지')}
-        ${item.notices?.[0] ? link(item.notices[0].url, 'KISA 보호나라 공지') : ''}
-      </p>` : ''}
       <dl>
-        <div><dt>영향 버전 <small>CNA</small></dt><dd>${visibleRanges || '명시된 영향 버전 미확인. 아래 영향 범위와 공지를 확인하세요.'}${ranges.length > 3 ? `<br><small>외 ${ranges.length - 3}개 범위 · 아래 영향 범위에 전체 표시</small>` : ''}</dd></div>
-        <div><dt>성립 조건 <small>CVSS 기준</small></dt><dd>${escape(conditions.length ? conditions.join(' / ') : '구조화된 조건 미확인')}${conditions.length ? '<br><small>제품별 설정·기능 조건은 아래 설명과 원문 참조</small>' : ''}</dd></div>
-        <div><dt>수정 버전</dt><dd>${item.officialPatches?.length ? 'KISA 제품별 패치 기준 확인 · 아래 패치 근거 참조' : escape(scopedPatches.length ? scopedPatches.join(' / ') : patches.length ?
-          '제품·릴리스별 적용 범위 확인 필요 · 아래 패치 근거 참조' : '수정 버전 미확인 · 벤더 공지 참조')}</dd></div>
-        <div><dt>첫 점검</dt><dd>${escape(firstCheck)}</dd></div>
+        <div><dt>영향받는 환경</dt><dd>
+          ${environment ? `<p class="summary-environment">${escape(environment)}</p>` : ''}
+          ${visibleRanges || '명시된 영향 버전 미확인'}
+          ${ranges.length > 3 ? `<br><small>외 ${ranges.length - 3}개 범위 · 아래 영향 범위에서 확인</small>` : ''}
+        </dd></div>
+        <div class="summary-first-check"><dt>첫 점검</dt><dd>
+          <span>${escape(firstAssetCheck(item))}</span>
+          ${conditions.length ? `<small>CVSS 조건 · ${escape(conditions.join(' / '))}</small>` : ''}
+          ${filters ? `<small>${escape(filters)}</small>` : ''}
+        </dd></div>
+        <div><dt>조치·패치 근거</dt><dd>
+          ${item.officialPatches?.length ? 'KISA 제품별 수정 기준 확인' : escape(scopedPatches.length ? scopedPatches.join(' / ') : patches.length ?
+            '제품·릴리스별 적용 범위 확인 필요' : '수정 버전 미확인 · 벤더 공지 참조')}
+          <p class="action-sources">
+            ${link(item.cna?.references?.[0] || item.references?.[0], '벤더 공지')}
+            ${item.notices?.[0] ? link(item.notices[0].url, 'KISA 보호나라 공지') : ''}
+            ${(briefingConditions[item.id]?.sources || []).slice(0,1).map(([label,address]) => link(address,label)).join('')}
+          </p>
+        </dd></div>
       </dl>
     </section>`;
 }
@@ -1609,13 +1655,16 @@ function renderInspector(panel = $('#inspector'), item = selected) {
   }
   const state = reviewState(item);
   panel.innerHTML = `
-    <div class="eyebrow"><span>${escape(item.id)}</span>${item.kev === true ? '<span class="pill critical">KEV 등재</span>' : ''}</div>
-    <h2 tabindex="-1">${escape(item.title)}</h2>
-    <div class="metrics">
-      <div>CVSS ${item.cvssVersion ? `v${escape(item.cvssVersion)}` : ''}<strong>${cvss(item)}</strong></div>
-      <div>EPSS<strong>${epss(item)}</strong></div><div>KEV<strong>${kev(item)}</strong></div>
+    <div class="inspector-heading">
+      <div class="eyebrow"><span>${escape(item.id)}</span></div>
+      ${panel.id === 'inspector' ? '<button type="button" class="outline inspector-close" data-close-inspector>상세 닫기</button>' : ''}
     </div>
+    <h2 tabindex="-1">${escape(cveHeading(item))}</h2>
     ${actionSummary(item)}
+    <div class="metrics inspector-metrics">
+      <div>CVSS ${item.cvssVersion ? `v${escape(item.cvssVersion)}` : ''}<strong>${Number.isFinite(item.cvss) ? cvss(item) : '미확인'}</strong></div>
+      <div>EPSS<strong>${item.epss ? epss(item) : '미확인'}</strong></div><div>KEV<strong>${kev(item)}</strong></div>
+    </div>
     ${installedVersionCheck(item)}
     ${debianPackageCheck(item)}
     <div class="review-control">
@@ -1982,7 +2031,8 @@ $('#rows').addEventListener('click', (event) => {
   if (!button) return;
   const id = button.dataset.id;
   selectItem(selected?.id === id ? null : id);
-  [...document.querySelectorAll('.cve-row')].find((row) => row.dataset.id === id)?.focus();
+  if (selected && event.detail === 0) $('#inspector h2')?.focus();
+  else [...document.querySelectorAll('.cve-row')].find((row) => row.dataset.id === id)?.focus();
 });
 document.querySelectorAll('[data-view]').forEach((button) => button.addEventListener('click', () => {
   view = button.dataset.view;
@@ -2602,7 +2652,15 @@ for (const panel of [$('#inspector'), $('#priority-inspector')]) {
 }
 
 let guideItem;
-$('#inspector').addEventListener('click', (event) => detailsAction(event, selected));
+$('#inspector').addEventListener('click', (event) => {
+  if (event.target.closest('[data-close-inspector]')) {
+    const id = selected?.id;
+    selectItem(null);
+    [...document.querySelectorAll('.cve-row')].find((row) => row.dataset.id === id)?.focus();
+    return;
+  }
+  detailsAction(event, selected);
+});
 $('#guide').addEventListener('click', (event) => {
   const button = event.target.closest('[data-translate]');
   if (button) translateDescription(button, guideItem);

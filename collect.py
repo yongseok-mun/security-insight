@@ -28,6 +28,7 @@ NVD_EXTRA = 30
 ARCHIVE_LIMIT = 1800
 ARCHIVE_DAYS = 30
 ARCHIVE_NEWS_LIMIT = 16
+BRIEFING_NEWS_LIMIT = 12
 VERSION_TOKEN = r'[0-9]+(?:\.[0-9]+)+(?:[A-Za-z0-9+~_-]+(?:\.[A-Za-z0-9+~_-]+)*)?'
 CVE = re.compile(r'\bCVE-\d{4}-\d{4,}\b', re.I)
 DARK = re.compile(r'다크웹|랜섬웨어|탈취.*판매|dark.?web|ransomware|leak site', re.I)
@@ -453,7 +454,32 @@ def fetch_debian_packages():
     return debian_packages(json.loads(payload))
 
 
-def candidates(feed, nvd, kev, previous, modified=None):
+def briefing_coverage(articles):
+    cutoff = NOW - dt.timedelta(hours=72)
+    coverage = {}
+    for article in articles:
+        date = moment(article.get('date'))
+        publisher = re.sub(r'[^\w]', '', article.get('publisher', '').casefold())
+        if (not publisher or not date or not cutoff <= date <= NOW
+                or (article['kind'] == 'aggregated' and article['publisher'] == article.get('feed'))):
+            continue
+        for cve_id in article['cves']:
+            entry = coverage.setdefault(cve_id, {'news': set(), 'official': False, 'latest': date})
+            if article['kind'] == 'advisory':
+                entry['official'] = True
+            else:
+                entry['news'].add(publisher)
+            entry['latest'] = max(entry['latest'], date)
+    ranked = [(key, value) for key, value in coverage.items()
+              if len(value['news']) >= (1 if value['official'] else 2)]
+    ranked.sort(key=lambda pair: (-int(pair[1]['official']), -len(pair[1]['news']),
+                                  -pair[1]['latest'].timestamp(), pair[0]))
+    return {key: {'official': value['official'], 'publishers': len(value['news']),
+                  'latest': value['latest'].isoformat()}
+            for key, value in ranked[:BRIEFING_NEWS_LIMIT]}
+
+
+def candidates(feed, nvd, kev, previous, modified=None, briefing_ids=(), known_briefing=None):
     previous_at = previous.get('updatedAt')
     cutoff = NOW - dt.timedelta(days=HISTORY_DAYS)
     feed_by_id = {item['id']: item for item in feed}
@@ -463,6 +489,13 @@ def candidates(feed, nvd, kev, previous, modified=None):
         current_feed = feed_by_id.get(item['id'])
         items[item['id']] = {**item, **current_feed, 'origin':'cve.now', 'lastDiscoveredAt':NOW.isoformat()} if current_feed else {
             **item, 'lastDiscoveredAt':NOW.isoformat()}
+    for cve_id in briefing_ids:
+        record = (modified or {}).get(cve_id) or nvd.get(cve_id)
+        cached = (known_briefing or {}).get(cve_id)
+        if cve_id not in items and (cve_id in feed_by_id or record or cached):
+            seed = feed_by_id.get(cve_id) or dict(id=cve_id, origin=(cached or {}).get('origin', 'NVD'),
+                                                publishedAt=(record or {}).get('published'))
+            items[cve_id] = {**seed, 'lastDiscoveredAt':NOW.isoformat()}
     published = sorted(nvd.values(), key=lambda item: item.get('published') or '', reverse=True)
     recent_changes = sorted((modified or {}).values(), key=lambda item: item.get('lastModified') or '', reverse=True)
     for source, quota in ((published, NVD_EXTRA), (recent_changes, NVD_EXTRA // 2)):
@@ -893,22 +926,35 @@ def collect():
         kev = kev_job.result()
         nvd = nvd_job.result()
         modified = nvd_changes_job.result()
-        items = candidates(feed, nvd, kev, previous, modified)
-        nvd.update(modified)
         old_rows = {entry['id']: entry for entry in previous.get('cves', [])}
         debian_job = pool.submit(attempt, 'Debian Security Tracker', fetch_debian_packages, previous_debian)
         if statuses['cve.now']['state'] == 'unavailable' and any(row.get('origin') == 'cve.now' for row in old_rows.values()):
             prior = previous.get('sources', {}).get('cve.now', {})
             statuses['cve.now'].update(state='stale', count=prior.get('count', 0))
-        probability_job = pool.submit(attempt, 'FIRST EPSS', lambda: epss([row['id'] for row in items]), {})
         feeds = {name: job.result() for name, job in feed_jobs.items()}
+        enrich_kisa_notices(feeds, previous_feeds)
+        coverage = briefing_coverage(article for group in feeds.values() for article in group)
+        known_briefing = {key: row for key in coverage if
+                          (row := old_rows.get(key) or previous_archive.get(key))
+                          and (row.get('nvd') or row.get('cnaChecked'))}
+        for key, row in known_briefing.items():
+            old_rows.setdefault(key, row)
+        feed_ids = {row['id'] for row in feed}
+        missing_briefing = [key for key in coverage if key not in feed_ids and key not in nvd and key not in modified]
+        if missing_briefing:
+            try:
+                nvd.update(nvd_selected(missing_briefing))
+            except SOURCE_ERRORS as error:
+                print(f'NVD briefing supplement: {error}', file=sys.stderr)
+        items = candidates(feed, nvd, kev, previous, modified, coverage, known_briefing)
+        nvd.update(modified)
+        probability_job = pool.submit(attempt, 'FIRST EPSS', lambda: epss([row['id'] for row in items]), {})
         missing = [item['id'] for item in items if item['id'] in kev and item['id'] not in nvd]
         supplement = attempt('NVD · KEV 보강', lambda: nvd_selected(missing), {}) if missing else {}
         nvd.update(supplement)
         probability = probability_job.result()
         debian = debian_job.result()
 
-    enrich_kisa_notices(feeds, previous_feeds)
     add_article_images(feeds, previous_feeds)
     news, seen = [], set()
     for article in (a for feed in feeds.values() for a in feed):
@@ -921,13 +967,15 @@ def collect():
     records = [merge_record(item, old_rows.get(item['id'], {}), nvd, kev, probability, news, merge_status)
                for item in items]
     for record in records:
+        if record['id'] in coverage:
+            record['briefingCoverage'] = coverage[record['id']]
         if record['id'] in debian:
             record['debianPackages'] = debian[record['id']]
     if not records:
         raise SystemExit('No valid CVE snapshot available')
     translation_file = ROOT / 'cve-ko.json'
     translations = json.loads(translation_file.read_text(encoding='utf-8')) if translation_file.exists() else {}
-    records = enrich_cves(records, previous, translations)
+    records = enrich_cves(records, {'cves': old_rows.values()}, translations)
     for item in records:
         apply_official_patches(item, old_rows.get(item['id'], {}), news)
         annotate_review_fields(item)

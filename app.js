@@ -217,6 +217,32 @@ function publicationDate(value) {
   return /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : koreaDay.format(stamp);
 }
 
+// Product families whose core runtime, OS or infrastructure role can span multiple services.
+const widespreadProducts = [
+  [/^(?:oracle )?(?:java se|graalvm(?: for jdk| enterprise edition)?|openjdk|jdk|hotspot)$/, 'Java 런타임·JDK'],
+  [/^(?:(?:linux )?linux kernel|linux linux|linux)$/, 'Linux 커널'],
+  [/^(?:microsoft )?windows(?: server| (?:10|11))?(?: [0-9][a-z0-9 ]*)?$/, 'Windows 운영체제'],
+  [/^(?:(?:google )?chrome|(?:google )?chromium|mozilla firefox|firefox)$/, '웹 브라우저'],
+  [/^(?:apache http server|apache httpd|nginx(?: open source| plus)?|openssl|open ssl)$/, '웹·TLS 공통 인프라'],
+  [/^(?:node js|nodejs|python|cpython|kubernetes)$/, '런타임·컨테이너 공통 인프라'],
+];
+
+function briefingReach(item) {
+  const products = [item.product, ...(item.cna?.affected || []).map(({product}) => product)].map(normalizeProduct);
+  return widespreadProducts.find(([pattern]) => products.some((product) => pattern.test(product)))?.[1] || '';
+}
+
+const briefingConditions = {
+  'CVE-2026-114938': {
+    text:'Java4Shell · x86-64 AVX-512 VBMI 및 공격자 입력의 Base64 디코딩 경로 확인',
+    sources:[
+      ['CISA 긴급 패치 권고', 'https://content.govdelivery.com/accounts/USDHSCISA/bulletins/4332a87'],
+      ['CSA 제품·악용 조건 안내', 'https://www.csa.gov.sg/alerts-and-advisories/alerts/al-2026-166/'],
+      ['Sophos CPU·공격 전제조건', 'https://www.sophos.com/en-us/security-advisories/sophos-sa-20261118-java4shell'],
+    ],
+  },
+};
+
 function briefingPriority(snapshot, isWatched = watched) {
   const asOf = Date.parse(snapshot.updatedAt);
   const endDay = Date.parse(koreaDay.format(asOf));
@@ -238,31 +264,42 @@ function briefingPriority(snapshot, isWatched = watched) {
     const watchedProduct = isWatched(item);
     const watchChange = watchedProduct ? changed.get(item.id) : undefined;
     const network = cvssMetrics(item).AV === 'N';
+    const reach = briefingReach(item);
+    const coverage = item.briefingCoverage;
+    const covered = recent(coverage?.latest, 4) && (coverage.official || coverage.publishers >= 2);
     const newHighRisk = network && item.cvss >= 9 && recent(item.published, 2);
-    const rank = newKev ? 0 : watchChange ? 1 : newHighRisk ? 2 : watchedProduct && network ? 3 : 4;
+    const broadImpact = Boolean(reach && network && item.cvss >= 7
+      && (recent(item.published, 2) || (covered && coverage.official)));
+    const spotlight = newHighRisk || broadImpact;
+    const rank = newKev ? 0 : watchChange ? 1 : spotlight ? 2 : watchedProduct && network ? 3 : 4;
     const reasons = [
       newKev ? `최근 KEV 등재 (${item.kevDate.slice(5, 10).replace('-', '.')})` : '',
       newHighRisk ? `신규 공개 고위험 (${publicationDate(item.published)})` : '',
+      reach ? `범용 구성요소 · ${reach}` : '',
+      covered ? [coverage.official ? '공공기관 공지' : '', `최근 보도 ${coverage.publishers}개 매체`].filter(Boolean).join(' · ') : '',
       watchChange ? '관심 제품의 조치 정보 변경' : watchedProduct ? '관심 제품' : '',
-      network ? '네트워크 접근 조건 · 외부 노출 확인' : '',
+      briefingConditions[item.id]?.text || (network ? '네트워크 접근 조건 · 외부 노출 확인' : ''),
     ].filter(Boolean);
     if (rank === 4) {
       reasons.unshift(item.kev === true ? '기존 KEV 등재' : '공개 위험 지표 기준');
     }
     const sortDate = newKev ? Date.parse(item.kevDate) : watchChange || 0;
-    return {item, rank, sortDate, watchChange, newHighRisk, reason:reasons.join(' · ')};
+    return {item, rank, sortDate, watchChange, spotlight, broadImpact, covered, reason:reasons.join(' · ')};
   }).sort((a, b) => a.rank - b.rank || b.sortDate - a.sortDate
+    || (a.rank === 2 ? Number(b.broadImpact) - Number(a.broadImpact)
+      || Number(b.covered) - Number(a.covered) : 0)
     || Number(b.item.kev === true) - Number(a.item.kev === true)
     || (b.item.cvss ?? -1) - (a.item.cvss ?? -1)
     || (b.item.epssStatus !== 'stale' ? b.item.epss?.score ?? -1 : -1)
       - (a.item.epssStatus !== 'stale' ? a.item.epss?.score ?? -1 : -1)
     || newest(a.item, b.item));
   const top = ranked.slice(0, 3);
-  // Keep the lead item and make room for a watched change and a new high-risk publication when present.
-  for (const key of ['watchChange', 'newHighRisk']) {
+  // Keep the lead item and reserve space for a watched change and a qualifying risk or broad impact.
+  for (const key of ['watchChange', ranked.some((entry) => entry.broadImpact) ? 'broadImpact' : 'spotlight']) {
     if (top.some((entry) => entry[key])) continue;
     const candidate = ranked.find((entry) => entry[key]);
-    const replace = top.findLastIndex((entry, index) => index > 0 && !entry.watchChange && !entry.newHighRisk);
+    const replace = top.findLastIndex((entry, index) => index > 0 && !entry.watchChange
+      && (key === 'broadImpact' || !entry.spotlight));
     if (candidate && replace !== -1) top[replace] = candidate;
   }
   return ranked.filter((entry) => top.includes(entry));
@@ -397,7 +434,9 @@ function evidence(item) {
   ];
   return sources.filter(([name]) => name !== 'cve.now' || item.origin !== 'CISA KEV').map(([name, address, note]) => `<details><summary>${icon('doc')}${name}</summary><p>${escape(note)} · ${link(address, '출처 열기')}</p></details>`).join('')
     + [...new Set([...(item.cna?.references || []), ...item.references])].map((address) => `<p class="evidence-link">${link(address, '벤더 공지·패치')}</p>`).join('')
-    + item.notices.map((notice) => `<p class="evidence-link">${link(notice.url, 'KISA · ' + notice.title)}</p>`).join('');
+    + item.notices.map((notice) => `<p class="evidence-link">${link(notice.url, 'KISA · ' + notice.title)}</p>`).join('')
+    + (briefingConditions[item.id]?.sources || []).map(([label, address]) =>
+      `<p class="evidence-link">${link(address, label)}</p>`).join('');
 }
 
 const versionStates = {affected:'영향받음', unaffected:'영향 없음', unknown:'영향 여부 미확인'};

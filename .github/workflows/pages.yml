@@ -5,6 +5,8 @@ on:
     branches: [main]
   schedule:
     - cron: '17 */2 * * *'
+    # Extra refresh before the 08:00 Korea time briefing.
+    - cron: '17 21 * * *'
   workflow_dispatch:
 
 permissions:

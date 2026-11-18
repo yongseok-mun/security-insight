@@ -395,3 +395,14 @@ dialog code { overflow-wrap: anywhere; }
 .news-issue > details { padding:2px 0 9px 12px; }
 .news-issue > details > summary { font-size:12px; width:fit-content; }
 .action-sources { display:flex; flex-wrap:wrap; gap:4px 12px; margin:0 0 8px; font-size:12px; color:var(--pink); }
+
+.my-work header { justify-content:flex-start; flex-wrap:wrap; }
+.my-work header h3 { margin-inline-end:auto; }
+.my-work header label { color:var(--muted); font-size:12px; }
+.my-work header select { min-height:36px; max-width:100%; }
+.my-work-row details { margin-top:5px; font-size:12px; }
+.my-work-row .actions a { align-self:center; padding:6px 9px; }
+[data-work-status]:empty { display:none; }
+#cve-mail-options { min-inline-size:0; margin:0 0 10px; padding:6px 10px; border:1px solid var(--line); border-radius:5px; }
+#cve-mail-options label { display:inline-flex; align-items:center; gap:4px; min-height:32px; margin-inline-end:10px; }
+#cve-mail-options .feed-note { margin:3px 0; }

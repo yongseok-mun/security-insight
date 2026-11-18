@@ -67,6 +67,8 @@ let priorityReasons = new Map();
 let pendingSnapshot;
 let newsMode = 'recent';
 let mailDraft;
+let cveMailContext;
+let myWorkFilter = 'active';
 let prioritySelection = null;
 let loading = false;
 let clockTimer;
@@ -589,6 +591,12 @@ function showDebianVersionResult(form, item) {
   const text = !fresh ? '이전 수집 자료 · Debian 원문에서 최신 수정 상태를 확인하세요.'
     : compared === null ? '추가 확인 필요 · Debian 소스 패키지 버전 형식을 확인하세요.'
     : compared >= 0 ? 'Debian 수정 패키지 버전 기준 충족' : 'Debian 수정 패키지보다 이전 버전';
+  result.dataset.summary = [
+    `Debian ${entry.suite} · ${entry.package}`,
+    `입력 버전: ${form.elements.debianVersion.value.trim()}`, text,
+    `공식 수정 버전 · ${entry.fixed}`,
+    status?.at && `자료 확인 · ${date(status.at)}`,
+  ].filter(Boolean).join('\n');
   result.innerHTML = `<strong>${text}</strong><p>공식 수정 버전 · ${escape(entry.fixed)}</p>
     ${status?.at ? `<p>자료 확인 · ${escape(date(status.at))}</p>` : ''}
     <p>${link(debianRecordUrl(item), '해당 CVE의 Debian 원문')}</p>`;
@@ -1153,6 +1161,7 @@ function renderInspector(panel = $('#inspector'), item = selected) {
     <div class="actions triage-actions">
       <button class="outline" data-guide="check">${icon('shield')}안전한 점검</button>
       <button class="outline" type="button" data-generate-advisory>${icon('doc')}보안공지문 생성</button>
+      <button class="outline" type="button" data-share-cve>${icon('doc')}이 CVE 공유</button>
       <button class="outline" type="button" data-copy-cve>${icon('link')}이 CVE 링크 복사</button>
       <span class="copy-status" role="status"></span>
     </div>
@@ -1304,15 +1313,17 @@ function myWorkRows(items, reviews, drafts, today) {
   return [...ids].flatMap((id) => {
     const item = byId.get(id);
     const draft = drafts.get(id);
-    const state = item ? reviewState(item) : reviews[id]?.state;
-    if (!draft && state !== 'investigate' && state !== 'recheck') return [];
+    const review = reviews[id];
+    const state = item ? reviewState(item) : review?.state === 'done' && remediationSinceReview({id}, review).length
+      ? 'recheck' : review?.state;
+    if (!draft && !['investigate', 'recheck', 'done'].includes(state)) return [];
     const due = draft?.metadata?.dueDate || '';
     const days = /^\d{4}-\d{2}-\d{2}$/.test(due) ? (Date.parse(due) - Date.parse(today)) / 86400000 : Infinity;
     const changed = Boolean(item && draft?.baseline && remediationHasChanges(item, draft.baseline));
     const urgency = days <= 0 ? 0 : changed || state === 'recheck' ? 1 : days <= 3 ? 2 : 3;
-    return [{id, item, draft, due, days, state, changed, urgency}];
+    return [{id, item, draft, review, due, days, state, changed, urgency}];
   }).sort((a,b) => a.urgency - b.urgency || (a.days - b.days || 0)
-    || (Date.parse(b.draft?.savedAt) || 0) - (Date.parse(a.draft?.savedAt) || 0) || a.id.localeCompare(b.id));
+    || (Date.parse(b.draft?.savedAt || b.review?.completedAt) || 0) - (Date.parse(a.draft?.savedAt || a.review?.completedAt) || 0) || a.id.localeCompare(b.id));
 }
 
 function myWork() {
@@ -1320,27 +1331,47 @@ function myWork() {
     timeZone:'Asia/Seoul',year:'numeric',month:'2-digit',day:'2-digit',
   }).format(new Date());
   const rows = myWorkRows(data.cves, preferences.reviews, storedAdvisoryDrafts(), today);
-  const render = ({id, item, draft, due, days, state, changed}) => {
+  const groups = [
+    ['active', '진행 중', rows.filter(({state}) => state !== 'done')],
+    ['recheck', '재검토', rows.filter(({state}) => state === 'recheck')],
+    ['done', '조치 완료', rows.filter(({state}) => state === 'done')],
+    ['draft', '저장한 초안', rows.filter(({draft}) => draft)],
+  ];
+  const visible = groups.find(([value]) => value === myWorkFilter)[2];
+  const render = ({id, item, draft, review, due, days, state, changed}) => {
     const dateLabel = days < 0 ? '기한 지남' : days === 0 ? '오늘 마감' : '조치 기한';
+    const completedAt = Date.parse(review?.completedAt);
+    const recorded = ['done', 'recheck'].includes(state) ? completedRemediation(review) : null;
+    const evidence = (recorded || []).flatMap((value, index) => value.length
+      ? [`<li>${escape(remediationFields[index])} · ${escape([value].flat().join(' / '))}</li>`] : []);
     return `<div class="my-work-row">
-      <div><small>${escape(id)}</small><strong>${escape(item?.titleKo || item?.title || draft?.title || id)}</strong>
+      <div><small>${escape(id)}</small><strong>${escape(item?.titleKo || item?.title || draft?.title || review?.title || id)}</strong>
         <div class="watch-badges">
           ${draft ? '<span class="pill">저장한 초안</span>' : ''}
-          ${state === 'investigate' || state === 'recheck' ? `<span class="pill review-${state}">${reviewLabels[state]}</span>` : ''}
+          ${state && state !== 'unreviewed' ? `<span class="pill review-${state}">${reviewLabels[state]}</span>` : ''}
           ${changed ? '<span class="pill review-recheck">조치 정보 변경</span>' : ''}
           ${due ? `<span class="pill ${days <= 3 ? 'review-recheck' : ''}">${dateLabel} · ${escape(due)}</span>` : ''}
-          ${!item ? '<span class="pill">현재 피드에 없음</span>' : ''}
-        </div></div>
+          ${!item ? '<span class="pill">보관 자료 조회</span>' : ''}
+        </div>
+        ${Number.isFinite(completedAt) ? `<small>완료 기록 ${escape(date(completedAt))}</small>` : ''}
+        ${recorded ? `<details><summary>완료 당시 조치 근거</summary>
+          ${evidence.length ? `<ul class="detail-list">${evidence.join('')}</ul>` : '<p>저장된 패치·완화 정보가 없습니다.</p>'}
+        </details>` : ''}
+      </div>
       <div class="actions">
         ${draft ? `<button type="button" class="outline" data-open-draft="${escape(id)}">초안 이어 쓰기</button>` : ''}
         ${item ? `<button type="button" class="outline" data-cve="${escape(id)}" ${state === 'recheck' ? 'data-open-review' : ''}>${state === 'recheck' ? '변경 확인' : 'CVE 열기'}</button>`
-          : link(cnaRecordUrl({id}), 'CVE 원문')}
+          : `<a class="outline" href="${escape(cveUrl(id))}" data-open-archived="${escape(id)}">보관 CVE 열기</a>`}
       </div>
     </div>`;
   };
-  return `<section class="digest digest-cve my-work"><header><h3>내 작업</h3>${rows.length ? `<span>${rows.length}건</span>` : ''}</header>
-    ${rows.length ? rows.slice(0, 6).map(render).join('') : '<p class="feed-note">저장한 공지 초안과 확인이 필요한 CVE가 여기에 표시됩니다.</p>'}
-    ${rows.length > 6 ? `<details><summary>나머지 ${rows.length - 6}건</summary>${rows.slice(6).map(render).join('')}</details>` : ''}
+  return `<section class="digest digest-cve my-work"><header><h3>내 작업</h3>
+    <label for="my-work-filter">작업 보기</label>
+    <select id="my-work-filter">${groups.map(([value,label,entries]) =>
+      `<option value="${value}" ${value === myWorkFilter ? 'selected' : ''}>${label} · ${entries.length}건</option>`).join('')}</select>
+    </header><p class="feed-note" data-work-status role="status"></p>
+    ${visible.length ? visible.slice(0, 6).map(render).join('') : '<p class="feed-note">이 상태에 해당하는 저장 작업이 없습니다.</p>'}
+    ${visible.length > 6 ? `<details><summary>나머지 ${visible.length - 6}건</summary>${visible.slice(6).map(render).join('')}</details>` : ''}
   </section>`;
 }
 
@@ -1494,6 +1525,8 @@ function detailsAction(event, item) {
   if (translate) translateDescription(translate, item);
   const copy = event.target.closest('[data-copy-cve]');
   if (copy) copyCveLink(copy, item);
+  const share = event.target.closest('[data-share-cve]');
+  if (share) openCveMail(share, item);
   const advisory = event.target.closest('[data-generate-advisory]');
   if (advisory) openAdvisory(advisory, item);
   const batch = event.target.closest('[data-export-batch]');
@@ -2115,7 +2148,7 @@ function updateReview(event, item) {
   const state = control.value;
   if (state === 'unreviewed') delete preferences.reviews[item.id];
   else preferences.reviews[item.id] = {
-    state, reviewedThrough:data.updatedAt, fingerprint:remediationFingerprint(item),
+    state, title:item.titleKo || item.title, reviewedThrough:data.updatedAt, fingerprint:remediationFingerprint(item),
     ...(state === 'done' ? {completedAt:new Date().toISOString()} : {}),
   };
   savePreferences();
@@ -2161,13 +2194,38 @@ $('#overview').addEventListener('submit', (event) => {
   $('#watch-name').focus();
 });
 
-$('#overview').addEventListener('click', (event) => {
+$('#overview').addEventListener('change', (event) => {
+  if (event.target.id !== 'my-work-filter') return;
+  myWorkFilter = event.target.value;
+  $('.my-work').outerHTML = myWork();
+  $('#my-work-filter').focus();
+});
+
+$('#overview').addEventListener('click', async (event) => {
+  const archived = event.target.closest('[data-open-archived]');
+  if (archived && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
+    event.preventDefault();
+    history.replaceState(null, '', archived.href);
+    openIncomingCve(archived.dataset.openArchived);
+    return;
+  }
   const edit = event.target.closest('[data-open-draft]');
   if (edit) {
     const id = edit.dataset.openDraft;
-    const item = data.cves.find((record) => record.id === id);
+    let item = data.cves.find((record) => record.id === id);
+    if (!item) {
+      edit.disabled = true;
+      const status = $('[data-work-status]');
+      status.textContent = '보관 CVE 근거를 확인하고 있습니다.';
+      try {
+        item = (await loadArchive())[id];
+      } catch { /* A locally saved draft can still be opened without its archive record. */ }
+      edit.disabled = false;
+      status.textContent = '';
+      if (!edit.isConnected || page !== 'home' || $('dialog[open]')) return;
+    }
     const saved = loadAdvisoryDraft({id});
-    if (saved) openAdvisory(null, item || {id,title:saved.title || id}, !item);
+    if (saved) openAdvisory(edit, item || {id,title:saved.title || id}, !item);
     return;
   }
   const remove = event.target.closest('[data-remove-watch]');
@@ -2231,10 +2289,12 @@ function buildMail() {
     }));
     if (articles.length) sections.push([page === 'home' ? '최신 보안 소식' : labels[page], articles]);
   }
-  const title = `Security Insight · ${labels[page]}`;
-  const stamp = `마지막 업데이트 ${date(data.updatedAt)}`;
+  return renderMail(`Security Insight · ${labels[page]}`, sections, location.href);
+}
+
+function renderMail(title, sections, address, stamp = `마지막 업데이트 ${date(data.updatedAt)}`) {
   const plain = [title, stamp, ...sections.flatMap(([heading, entries]) =>
-    [heading, ...entries.map((item) => [item.title, item.meta, item.note, item.url].filter(Boolean).join('\n'))])].join('\n\n');
+    [heading, ...entries.map((item) => [item.title, item.meta, item.note, ...(item.lines || []), publicUrl(item.url)].filter(Boolean).join('\n'))])].join('\n\n');
   const markup = `<!doctype html><html lang="ko"><head><meta charset="utf-8"></head>
     <body style="margin:0;background:#f4f3f5;color:#201e24;font-family:Arial,sans-serif">
     <table role="presentation" width="100%" cellspacing="0" cellpadding="18" style="max-width:680px;margin:auto">
@@ -2243,14 +2303,102 @@ function buildMail() {
     ${sections.map(([heading, entries]) => `<tr><td style="background:#fff"><h2 style="font-size:17px">${escape(heading)}</h2>
       ${entries.map((item) => `<div style="border-top:1px solid #e1dee3;padding:10px 0">
       <strong>${link(item.url, item.title) || escape(item.title)}</strong>
-      <p style="font-size:12px;color:#595361;margin:5px 0">${escape(item.meta)}${item.note ? ` · ${escape(item.note)}` : ''}</p></div>`).join('')}
+      ${item.meta ? `<p style="font-size:12px;color:#595361;margin:5px 0">${escape(item.meta)}${item.note ? ` · ${escape(item.note)}` : ''}</p>` : ''}
+      ${item.lines?.length ? `<ul style="margin:5px 0;padding-left:20px;overflow-wrap:anywhere">${item.lines.map((line) => `<li>${escape(line)}</li>`).join('')}</ul>` : ''}</div>`).join('')}
       </td></tr>`).join('')}
-    <tr><td style="font-size:12px;color:#595361">${link(location.href, 'Security Insight 열기')}</td></tr>
+    <tr><td style="font-size:12px;color:#595361">${link(address, 'Security Insight 열기')}</td></tr>
     </table></body></html>`;
   return {title, plain, markup, count:sections.reduce((sum, [, items]) => sum + items.length, 0)};
 }
 
+const cveMailOptions = $('#cve-mail-options');
+
+function openCveMail(button, item) {
+  const panel = button.closest('.inspector');
+  const installed = panel.querySelector('[data-version-check] .version-result:not([hidden])');
+  const debian = panel.querySelector('[data-debian-check] .version-result:not([hidden])');
+  const comparison = [];
+  if (installed?.dataset.summary) {
+    const fields = installed.closest('form').elements;
+    comparison.push({
+      title: '제품 버전 대조',
+      lines: [
+        `대조 제품 · ${fields.product.selectedOptions[0].textContent.trim()}`,
+        `설치 유형 · ${fields.build.selectedOptions[0].textContent.trim()}`,
+        ...installed.dataset.summary.split('\n'),
+      ],
+    });
+  }
+  if (debian?.dataset.summary) {
+    comparison.push({title:'Debian 패키지 대조', lines:debian.dataset.summary.split('\n'), url:debianRecordUrl(item)});
+  }
+  cveMailContext = {item, comparison};
+  for (const input of cveMailOptions.querySelectorAll('input')) {
+    input.checked = input.defaultChecked;
+    input.disabled = input.value === 'comparison' && !comparison.length;
+  }
+  $('#cve-mail-note').textContent = comparison.length
+    ? '대조 결과를 선택하면 입력한 설치 버전도 메일에 포함됩니다.'
+    : '이 상세 화면에서 설치 버전을 대조하면 그 결과도 첨부할 수 있습니다.';
+  cveMailOptions.hidden = false;
+  refreshCveMail();
+  $('#email-dialog').showModal();
+}
+
+function refreshCveMail() {
+  const {item, comparison} = cveMailContext;
+  const included = new Set([...cveMailOptions.querySelectorAll('input:checked:not(:disabled)')].map((input) => input.value));
+  const address = cveUrl(item.id);
+  const sections = [['취약점', [{
+    title: item.titleKo || item.title,
+    meta: `CVSS ${cvss(item)} · EPSS ${epss(item)} · KEV ${kev(item)}`,
+    url: address,
+  }]]];
+  if (included.has('impact')) {
+    const ranges = item.impactScope?.length ? item.impactScope : affectedRanges(item);
+    const conditions = attackConditions(item);
+    sections.push(['영향 범위 및 전제조건', [{
+      title: 'CNA 공식 기록', url:cnaRecordUrl(item),
+      lines: [...(ranges.length ? ranges : ['구조화된 영향 범위 미확인']),
+        ...(conditions.length ? [`CVSS 기준 · ${conditions.join(' / ')}`] : [])],
+    }, {title:'NVD 상세', url:nvdRecordUrl(item)}]]);
+  }
+  if (included.has('patch')) {
+    const kisa = (item.officialPatches || []).map(({product, affected, fixed, url, fresh}) => ({
+      title: `${product} · KISA 보호나라`, url,
+      lines: [`영향 ${affected} → 해결 ${fixed}${fresh ? '' : ' · 이전 수집 자료'}`],
+    }));
+    const debianStatus = data.sources?.['Debian Security Tracker'];
+    const debian = (item.debianPackages || []).map(({suite, package:pkg, fixed}) => ({
+      title: `${suite} / ${pkg} · Debian Security Tracker`, url:debianRecordUrl(item),
+      lines: [`수정 패키지 ${fixed}${debianStatus?.state === 'ok' ? '' : ' · 최신 상태는 원문에서 확인'}`],
+    }));
+    const cna = patchRecords(item).filter((patch) => patch.source === 'CNA 해결책 명시').map((patch) => {
+      const product = patchProduct(item, patch);
+      return {
+        title: product ? compareProductLabel(product, item.product) : 'CNA 해결책 · 적용 제품·릴리스 확인 필요',
+        url: patch.url,
+        lines: [`수정 버전 ${patch.version}`, patch.text].filter(Boolean),
+      };
+    });
+    const patches = [...kisa, ...debian, ...cna];
+    sections.push(['공식 해결 기준', patches.length ? patches : [{
+      title: '제품·릴리스별 공식 해결 기준 미확인', url:cnaRecordUrl(item),
+    }]]);
+  }
+  if (included.has('comparison') && comparison.length) sections.push(['이번 설치 버전 대조 결과', comparison]);
+  const archived = !data.cves.some((record) => record.id === item.id);
+  mailDraft = renderMail(`Security Insight · ${item.id}`, sections, address, archived
+    ? '보관 CVE 자료 · 최신 조치는 공식 원문에서 확인' : undefined);
+  $('#email-scope').textContent = `${item.id} · 취약점 공유`;
+  $('#email-preview').srcdoc = mailDraft.markup;
+}
+
+cveMailOptions.addEventListener('change', refreshCveMail);
+
 $('#open-email').addEventListener('click', () => {
+  cveMailContext = undefined;
+  cveMailOptions.hidden = true;
   mailDraft = buildMail();
   $('#email-scope').textContent = `${labels[page]} · ${mailDraft.count}건`;
   $('#email-preview').srcdoc = mailDraft.markup;
@@ -2290,7 +2438,7 @@ $('#email-form').addEventListener('submit', (event) => {
       'Content-Transfer-Encoding: base64', '', wrapped(body), '']),
     `--${boundary}--`, '',
   ].join('\r\n');
-  downloadBlob(new Blob([message], {type:'message/rfc822'}), 'security-insight.eml');
+  downloadBlob(new Blob([message], {type:'message/rfc822'}), cveMailContext ? `${cveMailContext.item.id}.eml` : 'security-insight.eml');
 });
 
 function showSourceStatus() {
@@ -2315,6 +2463,19 @@ $('#source-alert').addEventListener('click', (event) => {
   if (event.target.closest('[data-source-status]')) $('#source-status').open = true;
 });
 
+function loadArchive() {
+  if (!archivePromise) {
+    archivePromise = fetch('./cve-archive.json', {cache:'no-cache'}).then((response) => {
+      if (!response.ok) throw Error(`CVE archive HTTP ${response.status}`);
+      return response.json();
+    }).catch((error) => {
+      archivePromise = undefined;
+      throw error;
+    });
+  }
+  return archivePromise;
+}
+
 async function searchArchivedCve(query, focus = false) {
   if (!normalizeProduct(query) || rowsForFilters().some((item) => data.cves.includes(item))) return;
   const id = /^CVE-\d{4}-\d{4,}$/i.test(query) ? query.toUpperCase() : '';
@@ -2324,16 +2485,7 @@ async function searchArchivedCve(query, focus = false) {
   status.hidden = false;
   status.textContent = '보관 CVE를 조회하고 있습니다.';
   try {
-    if (!archivePromise) {
-      archivePromise = fetch('./cve-archive.json', {cache:'no-cache'}).then((response) => {
-        if (!response.ok) throw Error(`CVE archive HTTP ${response.status}`);
-        return response.json();
-      }).catch((error) => {
-        archivePromise = undefined;
-        throw error;
-      });
-    }
-    const request = archivePromise;
+    const request = loadArchive();
     const archive = await request;
     if (!inSearch() || request !== archivePromise) return;
     const listed = new Set(data.cves.map((item) => item.id));
@@ -2366,6 +2518,8 @@ function openIncomingCve(id) {
   const status = $('#cve-link-status');
   const found = data.cves.some((item) => item.id === id);
   status.hidden = true;
+  $('#filters').reset();
+  view = 'latest';
   showPage('cve');
   $('#query').value = id;
   selectItem(found ? id : null);

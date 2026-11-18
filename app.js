@@ -56,6 +56,13 @@ const cveUrl = (id) => {
   url.searchParams.set('cve', id);
   return url.href;
 };
+function setCveLocation(id) {
+  const url = new URL(location.href);
+  if (id) url.searchParams.set('cve', id);
+  else url.searchParams.delete('cve');
+  if (url.href !== location.href) history.replaceState(history.state, '', url);
+}
+
 let data = {cves:[], news:[], sources:{}};
 let selected;
 let archiveResults = [];
@@ -182,7 +189,8 @@ function cveSearchMatch(item, query) {
     const text = normalizeProduct(values.filter(Boolean).join(' '));
     return terms.every((term) => text.includes(term));
   };
-  if (matches([item.id, item.title, item.product, ...(item.fixes || []), item.description])) return '';
+  const aliases = briefingConditions[item.id]?.searchAliases || [];
+  if (matches([item.id, cveHeading(item), item.title, item.product, ...aliases, ...(item.fixes || []), item.description])) return '';
   if (matches((item.officialPatches || []).map(({product}) => product))) return 'KISA 제품명 일치';
   if (matches((item.cna?.affected || []).flatMap(({vendor, product}) => [vendor, product]))) return 'CNA 제품명 일치';
   if (matches([item.titleKo, item.descriptionKo])) return '한국어 설명 일치';
@@ -235,6 +243,7 @@ function briefingReach(item) {
 const briefingConditions = {
   'CVE-2026-114938': {
     alias:'Java4Shell',
+    searchAliases:['자바포셸', '자바포쉘', 'Java 4 Shell'],
     environment:'영향받는 Java 런타임에서 x86-64 AVX-512 VBMI 경로를 사용하고, 공격자 입력이 Base64 디코딩에 도달하는 환경',
     firstCheck:'서비스·컨테이너의 번들 JDK 버전과 CPU의 AVX-512 VBMI 지원 여부를 확인하세요.',
     sources:[
@@ -411,7 +420,9 @@ wideCveLayout.addEventListener('change', placeCveInspector);
 
 function renderRows() {
   const records = rowsForFilters();
+  const previousSelection = selected;
   if (!records.includes(selected)) selected = null;
+  if (page === 'cve' && (selected || previousSelection)) setCveLocation(selected?.id);
   const inspector = $('#inspector');
   rememberComparisons('#inspector');
   inspector.hidden = true;
@@ -1660,6 +1671,12 @@ function renderInspector(panel = $('#inspector'), item = selected) {
       ${panel.id === 'inspector' ? '<button type="button" class="outline inspector-close" data-close-inspector>상세 닫기</button>' : ''}
     </div>
     <h2 tabindex="-1">${escape(cveHeading(item))}</h2>
+    <div class="actions inspector-quick-actions" role="group" aria-label="선택한 CVE 작업">
+      ${comparisonProducts(item).length ? '<button class="accent" type="button" data-asset-csv>자산 CSV 대조</button>' : ''}
+      <button class="outline" type="button" data-copy-cve>${icon('link')}CVE 링크 복사</button>
+      <button class="outline" type="button" data-share-cve>${icon('doc')}이 CVE 공유</button>
+      <span class="copy-status" role="status"></span>
+    </div>
     ${actionSummary(item)}
     <div class="metrics inspector-metrics">
       <div>CVSS ${item.cvssVersion ? `v${escape(item.cvssVersion)}` : ''}<strong>${Number.isFinite(item.cvss) ? cvss(item) : '미확인'}</strong></div>
@@ -1680,10 +1697,6 @@ function renderInspector(panel = $('#inspector'), item = selected) {
     <div class="actions triage-actions">
       <button class="outline" data-guide="check">${icon('shield')}안전한 점검</button>
       <button class="outline" type="button" data-generate-advisory>${icon('doc')}보안공지문 생성</button>
-      ${comparisonProducts(item).length ? '<button class="outline" type="button" data-asset-csv>자산 CSV 대조</button>' : ''}
-      <button class="outline" type="button" data-share-cve>${icon('doc')}이 CVE 공유</button>
-      <button class="outline" type="button" data-copy-cve>${icon('link')}이 CVE 링크 복사</button>
-      <span class="copy-status" role="status"></span>
     </div>
     ${cveHistory(item)}
     <div class="technical-details">${technicalDetails(item)}</div>
@@ -1693,9 +1706,7 @@ function renderInspector(panel = $('#inspector'), item = selected) {
 }
 
 function showPage(name) {
-  if (name !== 'cve' && new URL(location.href).searchParams.has('cve')) {
-    history.replaceState(null, '', location.pathname);
-  }
+  if (name !== 'cve') setCveLocation(null);
   const switched = page !== name;
   if (switched) {
     rememberComparisons('#inspector');
@@ -2006,6 +2017,7 @@ function showGuide(item, mode) {
 function selectItem(id) {
   selected = data.cves.find((item) => item.id === id) || (archiveQuery === $('#query').value.trim() ? archiveResults.find((item) => item.id === id) : null);
   renderRows();
+  if (page === 'cve' && !selected) setCveLocation(null);
 }
 
 $('#filters').addEventListener('submit', (event) => {
@@ -2015,6 +2027,7 @@ $('#filters').addEventListener('submit', (event) => {
 $('#filters').addEventListener('input', () => {
   $('#cve-link-status').hidden = true;
   const id = $('#query').value.trim().toUpperCase();
+  if (!selected) setCveLocation(null);
   if (archiveQuery !== $('#query').value.trim()) {
     archiveQuery = '';
     archiveResults = [];
@@ -2736,7 +2749,6 @@ $('#overview').addEventListener('click', async (event) => {
   const archived = event.target.closest('[data-open-archived]');
   if (archived && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
     event.preventDefault();
-    history.replaceState(null, '', archived.href);
     openIncomingCve(archived.dataset.openArchived);
     return;
   }
@@ -3055,7 +3067,10 @@ function openIncomingCve(id) {
   $('#query').value = id;
   selectItem(found ? id : null);
   if (found) $('#inspector h2')?.focus();
-  else searchArchivedCve(id, true);
+  else {
+    setCveLocation(id);
+    searchArchivedCve(id, true);
+  }
 }
 
 const comparisonForms = '[data-version-check], [data-debian-check]';
@@ -3177,6 +3192,7 @@ function applySnapshot(snapshot) {
     renderOverview();
     if (watchDraft) $('#watch-name').value = watchDraft;
   } else if (page !== 'cve') renderFeed();
+  else if (currentSelection && !selected) openIncomingCve(currentSelection);
   else if (archiveQuery && $('#query').value.trim() === archiveQuery) searchArchivedCve(archiveQuery);
 
   if (page === 'home' && briefingSelection && !prioritySelection

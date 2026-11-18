@@ -5,12 +5,12 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="description" content="CVE 우선순위, 영향 범위, 안전한 점검과 출처를 한 화면에서 확인하는 보안 인텔리전스 대시보드">
 <title>Security Insight</title>
-<link rel="stylesheet" href="style.css?v=briefing-design-35">
+<link rel="stylesheet" href="style.css?v=cve-search-actions-36">
 <style>
   .brand-text { display: flex; flex-direction: column; line-height: 1.3; }
   .brand-text small { color: var(--muted); font-size: 11px; font-weight: 500; }
 </style>
-<script src="app.js?v=briefing-design-35" defer></script>
+<script src="app.js?v=cve-search-actions-36" defer></script>
 </head>
 <body>
 <header class="site-header"><div class="header-content">
@@ -66,7 +66,7 @@
           <button type="button" id="open-debian-lookup">Debian 패키지 조회</button>
         </div>
         <form id="filters" aria-label="CVE 검색 및 필터">
-          <label class="search"><span data-icon="search"></span><input id="query" type="search" aria-label="CVE 검색" placeholder="CVE ID 또는 제품 검색"></label>
+          <label class="search"><span data-icon="search"></span><input id="query" type="search" aria-label="CVE 검색" placeholder="CVE ID·제품·별칭 검색"></label>
           <select id="product" aria-label="제품"><option value="">모든 제품</option></select>
         </form>
       </div>
@@ -153,7 +153,7 @@
   <p class="feed-note">파일과 판정 결과는 브라우저에서만 처리하며, 창을 닫으면 초기화됩니다. 헤더가 있는 파일을 사용하세요. 최대 2MB, 자산 5,000행까지 지원합니다.</p>
   <section id="asset-picker" aria-label="대조할 CVE" hidden>
     <p class="feed-note">오늘 우선 확인 항목 또는 현재 수집 목록에서 최대 5건을 고르세요.</p>
-    <label>CVE ID 또는 제품 검색 <input id="asset-cve-query" type="search"></label>
+    <label>CVE ID·제품·별칭 검색 <input id="asset-cve-query" type="search"></label>
     <div class="asset-candidates" id="asset-candidates"></div>
     <div class="actions asset-selection">
       <button id="asset-cve-continue" class="utility" type="button" disabled>선택한 CVE로 계속</button>

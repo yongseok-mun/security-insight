@@ -452,3 +452,8 @@ dialog code { overflow-wrap: anywhere; }
   .cve-workbench.has-selection .cve-row { grid-template-columns:max-content minmax(0,1fr); gap:5px 8px; padding-inline:7px; }
   .cve-workbench.has-selection .cve-description { grid-column:1/-1; grid-row:1; }
 }
+
+.inspector .inspector-quick-actions { margin:4px 0 10px; align-items:center; }
+.inspector-quick-actions .copy-status { font-size:12px; min-width:0; max-width:100%; }
+.inspector-quick-actions .copy-status:empty { display:none; }
+.inspector-quick-actions .copy-status input { max-width:100%; }

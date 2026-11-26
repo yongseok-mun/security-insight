@@ -35,7 +35,8 @@ DARK = re.compile(r'다크웹|랜섬웨어|탈취.*판매|dark.?web|ransomware|l
 SECURITY = re.compile(r'보안|해킹|침해|취약점|랜섬웨어|정보.?유출|악성코드|사이버|security|CVE-', re.I)
 GOOGLE = 'https://news.google.com/rss/search?'
 NVD = 'https://services.nvd.nist.gov/rest/json/cves/2.0'
-KEV = 'https://raw.githubusercontent.com/cisagov/kev-data/develop/known_exploited_vulnerabilities.json'
+KEV_ORIGIN = 'https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json'
+KEV_MIRROR = 'https://raw.githubusercontent.com/cisagov/kev-data/develop/known_exploited_vulnerabilities.json'
 DEBIAN_TRACKER = 'https://security-tracker.debian.org/tracker/data/json'
 DEBIAN_SUITES = ('bullseye', 'bookworm', 'trixie')
 SOURCE_ERRORS = (OSError, ValueError, KeyError, TypeError, EOFError, xml.ParseError)
@@ -889,6 +890,65 @@ def collect_source(name, job, fallback, previous_status, retry=False):
                           count=len(fallback), attempts=attempts)
 
 
+def collect_kev(previous_status, retry=False):
+    """Select the latest complete CISA catalog and reject release regressions."""
+    previous_release = previous_status.get('lastSuccessfulDateReleased')
+    if previous_status.get('state') == 'ok':
+        previous_release = previous_status.get('dateReleased') or previous_release
+    previous_time = dt.datetime.fromisoformat(previous_release) if previous_release else None
+    metadata = {}
+
+    def fetch_latest():
+        metadata.clear()
+        candidates = []
+        errors = []
+        for address in (KEV_ORIGIN, KEV_MIRROR):
+            try:
+                payload = json.loads(get(address))
+                release = dt.datetime.fromisoformat(payload['dateReleased'])
+                if release.tzinfo is None or release > NOW:
+                    raise ValueError('invalid KEV release time')
+                version = payload['catalogVersion']
+                rows = payload['vulnerabilities']
+                expected = payload['count']
+                if not isinstance(version, str) or not version.strip():
+                    raise ValueError('missing KEV catalog version')
+                if not isinstance(rows, list) or type(expected) is not int or expected <= 0:
+                    raise ValueError('invalid KEV catalog counts')
+                records = {
+                    row['cveID']: row for row in rows
+                    if isinstance(row, dict) and isinstance(row.get('cveID'), str)
+                    and CVE.fullmatch(row['cveID']) and row['cveID'].isupper()
+                    and all(isinstance(row.get(key), str) and row[key].strip()
+                            for key in ('vendorProject', 'product', 'dateAdded'))
+                }
+                complete = len(records) == len(rows) == expected
+                details = dict(catalogVersion=version, dateReleased=release.isoformat(),
+                               expected=expected, count=len(records), arrayCount=len(rows), url=address)
+                candidates.append((release, complete, details, records))
+            except SOURCE_ERRORS as error:
+                errors.append(f'{address}: {error}')
+        if not candidates:
+            raise ValueError(' | '.join(errors))
+        release, complete, details, records = max(candidates, key=lambda item: item[:2])
+        metadata.update(details)
+        if not complete:
+            raise ValueError('latest KEV catalog is incomplete')
+        if previous_time is not None and release < previous_time:
+            raise ValueError('KEV catalog is older than the last successful release')
+        return records
+
+    records, status = collect_source('CISA KEV', fetch_latest, {}, previous_status, retry=retry)
+    status.update(metadata)
+    if status['state'] == 'ok':
+        status['lastSuccessfulDateReleased'] = status['dateReleased']
+    else:
+        status['state'] = 'blocked'
+        if previous_release:
+            status['lastSuccessfulDateReleased'] = previous_release
+    return records, status
+
+
 def collect():
     path = ROOT / 'data.json'
     previous = json.loads(path.read_text()) if path.exists() else {}
@@ -919,11 +979,9 @@ def collect():
         now_job = pool.submit(attempt, 'cve.now', cve_now, [])
         nvd_job = pool.submit(attempt, 'NVD', nvd_recent, {})
         nvd_changes_job = pool.submit(attempt, 'NVD · 최근 수정', lambda: nvd_recent(modified=True), {})
-        kev_job = pool.submit(attempt, 'CISA KEV', lambda: {
-            row['cveID']: row for row in json.loads(get(KEV))['vulnerabilities']
-        }, {})
+        kev_job = pool.submit(collect_kev, previous.get('sources', {}).get('CISA KEV', {}), retry=morning)
         feed = now_job.result()
-        kev = kev_job.result()
+        kev, statuses['CISA KEV'] = kev_job.result()
         nvd = nvd_job.result()
         modified = nvd_changes_job.result()
         old_rows = {entry['id']: entry for entry in previous.get('cves', [])}

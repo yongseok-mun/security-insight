@@ -746,12 +746,19 @@ IMPACT_RULES = tuple((area, re.compile(pattern, re.I)) for area, pattern in (
     ('development', r'\b(?:gitlab|jenkins|gitea|forgejo|github enterprise server|teamcity|atlassian bamboo|azure devops|visual studio code|visual studio|jetbrains intellij idea|eclipse ide|sonarqube|apache maven)\b'),
     ('endpoint', r'\b(?:microsoft office|microsoft 365 apps|microsoft outlook|adobe acrobat|acrobat reader|adobe photoshop|chromium|google chrome|microsoft edge|mozilla firefox|mozilla thunderbird|apple safari|webkit|libreoffice|remote desktop client|notepad plus plus|7 zip|winrar)\b'),
     ('industrial', r'\b(?:scada|simatic|wincc|tia portal|factorytalk|codesys|ignition scada|modicon|ecostruxure|studio 5000|control logix)\b'),
-    ('network-service', r'\b(?:unrealircd|inspircd|cisco broadworks|asterisk pbx|freeswitch|postfix|exim|dovecot|sendmail|powerdns|bind 9|unbound dns|exchange server|zimbra collaboration)\b'),
+    ('network-service', r'\b(?:webtop media transcoder|unrealircd|inspircd|cisco broadworks|asterisk pbx|freeswitch|postfix|exim|dovecot|sendmail|powerdns|bind 9|unbound dns|exchange server|zimbra collaboration)\b'),
     ('database', r'\b(?:postgresql|mysql|mariadb|oracle database|sql server|mongodb|redis|valkey|elasticsearch|opensearch|sqlite|cassandra|kafka|rabbitmq)\b'),
     ('cloud-virtualization', r'\b(?:kubernetes|kubelet|containerd|cri o|docker|runc|esxi|vcenter|vsphere|hyper v|qemu|xen|openshift|openstack|proxmox|gpustack|rancher|nomad|harbor registry|amazon eks|azure kubernetes service)\b'),
     ('system', r'\b(?:openssh|openssh server|systemd|polkit|sudo|shadow utils|linux pam|winlogon|windows (?:print spooler|server|10|11)|ubuntu linux|debian linux|red hat enterprise linux|active directory|samba|glibc|gnutls)\b'),
     ('library-runtime', r'\b(?:openssl|libssl|libcurl|curl|libxml2|libpng|libssh|log4j|spring framework|node js|openjdk|java runtime|python runtime|zlib|xz utils|php runtime|dotnet runtime|net runtime)\b'),
 ))
+
+
+# KEV labels these entries "Multiple Products"; vendor advisories identify the product family.
+IMPACT_ADVISORY_OVERRIDES = {
+    'CVE-2026-123039': ('appliance', 'https://sc1.checkpoint.com/documents/Jumbo_HFA/R81.20/Jumbo/Jumbo_Maintrain/R81.20/Take_174.html'),
+    'CVE-2026-111560': ('appliance', 'https://trust.barracuda.com/security/pre-authentication-authorization-bypass-command-injection'),
+}
 
 
 def classify_impact(item):
@@ -781,6 +788,9 @@ def classify_impact(item):
         ('product', (item.get('product'),)),
     )
     areas = {}
+    override = IMPACT_ADVISORY_OVERRIDES.get(item.get('id'))
+    if override:
+        areas[override[0]] = 'advisory'
     for source, products in evidence:
         for product in products:
             if area := match_product(product):
@@ -794,7 +804,10 @@ def classify_impact(item):
                 areas[area] = 'title'
     if not areas:
         return dict(primary='unclassified', areas=[], evidence={})
-    return dict(primary=next(iter(areas)), areas=list(areas), evidence=areas)
+    result = dict(primary=next(iter(areas)), areas=list(areas), evidence=areas)
+    if override:
+        result['references'] = {override[0]: override[1]}
+    return result
 
 
 def annotate_review_fields(item):

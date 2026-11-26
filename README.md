@@ -16,3 +16,7 @@ npm run dev
 - 보호나라, 데일리시큐, ZDNet Korea, Google 뉴스, The Hacker News, BleepingComputer의 제목·발행 시각·원문 링크를 수집한다. ZDNet Korea는 Google 뉴스 RSS를 경유한다.
 - GitHub Pages의 게시 소스를 **GitHub Actions**로 설정한다. 워크플로는 기본 브랜치 푸시, 수동 실행 및 두 시간 간격으로 수집해 정적 스냅샷을 배포한다. 이전 수집 상태는 캐시로 보존한다. 저장소의 `data.json`은 초기 스냅샷이다.
 - 이 서비스는 NVD 데이터를 사용하며 NVD의 보증이나 인증을 받지 않았다.
+
+## 원격 MCP
+
+공개 CVE·뉴스·변경 이력을 읽기 전용으로 조회하는 Worker와 관리자 키 화면의 배포 방법은 [MCP 안내](mcp/README.md)를 참고하세요.

@@ -1,0 +1,11 @@
+name = "security-insight-mcp"
+main = "worker.mjs"
+compatibility_date = "2025-11-25"
+
+[[durable_objects.bindings]]
+name = "KEYS"
+class_name = "KeyStore"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["KeyStore"]

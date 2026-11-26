@@ -737,9 +737,61 @@ def apply_official_patches(item, old, news):
         item.pop('officialPatches', None)
 
 
+# Match named product families conservatively. Unrecognized products stay unclassified.
+IMPACT_RULES = tuple((area, re.compile(pattern, re.I)) for area, pattern in (
+    ('kernel', r'\b(?:linux kernel|windows kernel|freebsd kernel|xnu kernel|kernel driver|kernel module)\b'),
+    ('appliance', r'\b(?:fortios|fortigate|pan os|globalprotect|big ip|netscaler|citrix adc|junos|ios xe|ios xr|asa software|secure firewall|sonicos|pulse connect secure|ivanti connect secure|ivanti policy secure|sophos firewall|routeros|watchguard firebox|edgeos|draytek vigor)\b'),
+    ('web-service', r'\b(?:nginx|openresty|apache http server|apache httpd|http server|httpd|tomcat|jetty|iis|internet information services|haproxy|envoy proxy|traefik|weblogic|websphere|wildfly|jboss eap|undertow|lighttpd|caddy server)\b'),
+    ('web-app', r'\b(?:wordpress|drupal|joomla|magento|mediawiki|confluence|jira|sharepoint|roundcube|gitlab|jenkins|grafana|nextcloud|moodle)\b'),
+    ('database', r'\b(?:postgresql|mysql|mariadb|oracle database|sql server|mongodb|redis|valkey|elasticsearch|opensearch|sqlite|cassandra|kafka|rabbitmq)\b'),
+    ('cloud-virtualization', r'\b(?:kubernetes|kubelet|containerd|cri o|docker|runc|esxi|vcenter|vsphere|hyper v|qemu|xen|openshift|openstack|proxmox)\b'),
+    ('system', r'\b(?:openssh|openssh server|systemd|polkit|sudo|shadow utils|linux pam|winlogon|windows (?:print spooler|server|10|11)|ubuntu linux|debian linux|red hat enterprise linux|active directory|samba|glibc|gnutls|bind 9|unbound dns)\b'),
+    ('library-runtime', r'\b(?:openssl|libssl|libcurl|curl|libxml2|libpng|libssh|log4j|spring framework|node js|openjdk|java runtime|python runtime|zlib|xz utils|php runtime|dotnet runtime|net runtime)\b'),
+))
+
+
+def classify_impact(item):
+    def matched(products):
+        areas = []
+        for product in products:
+            if not isinstance(product, str):
+                continue
+            name = re.sub(r'[^a-z0-9]+', ' ', product.lower()).strip()
+            if area := next((area for area, rule in IMPACT_RULES if rule.search(name)), None):
+                if area not in areas:
+                    areas.append(area)
+        return areas
+
+    def nvd_products(node):
+        for match in node.get('cpeMatch', []):
+            if match.get('vulnerable') is True:
+                parts = re.split(r'(?<!\\):', match.get('criteria') or '')
+                if len(parts) >= 5 and parts[:2] == ['cpe', '2.3']:
+                    yield f'{parts[3]} {parts[4]}'
+        for child in node.get('children', []):
+            yield from nvd_products(child)
+
+    entries = (item.get('cna') or {}).get('affected') or []
+    evidence = (
+        ('cna', (f"{row.get('vendor') or ''} {row.get('product') or ''}" for row in entries)),
+        ('nvd', (product for config in item.get('nvdConfigurations') or []
+                 for node in config.get('nodes', []) for product in nvd_products(node))),
+        ('advisory', (row.get('product') for row in item.get('officialPatches') or [])),
+        ('product', (item.get('product'),)),
+    )
+    areas = {}
+    for source, products in evidence:
+        for area in matched(products):
+            areas.setdefault(area, source)
+    if not areas:
+        return dict(primary='unclassified', areas=[], evidence={})
+    return dict(primary=next(iter(areas)), areas=list(areas), evidence=areas)
+
+
 def annotate_review_fields(item):
     item['impactScope'] = impact_values(item)
     item['patchEvidence'] = patch_evidence(item)
+    item['impactArea'] = classify_impact(item)
 
 
 def featured_news_cves(news, active_ids):
@@ -803,7 +855,7 @@ def build_archive(previous, prior_active, nvd, feed, active, kev, debian, news, 
     for key, item in archive.items():
         seen = moment(item.get('archivedAt') or item.get('lastDiscoveredAt'))
         if key not in active_ids and seen and seen >= cutoff:
-            retained.append((key, {**item, 'archivedAt':seen.isoformat()}))
+            retained.append((key, {**item, 'archivedAt':seen.isoformat(), 'impactArea':classify_impact(item)}))
     featured = set(featured_ids)
     retained.sort(key=lambda pair: (pair[0] in featured, pair[1]['archivedAt'], pair[0]), reverse=True)
     return dict(retained[:ARCHIVE_LIMIT])

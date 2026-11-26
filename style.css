@@ -457,3 +457,16 @@ dialog code { overflow-wrap: anywhere; }
 .inspector-quick-actions .copy-status { font-size:12px; min-width:0; max-width:100%; }
 .inspector-quick-actions .copy-status:empty { display:none; }
 .inspector-quick-actions .copy-status input { max-width:100%; }
+
+.impact-filter { border: 0; padding: 0 0 14px; margin: 0; min-width: 0; }
+.impact-filter legend { padding: 0; margin-bottom: 8px; color: var(--muted); font-size: .85rem; }
+.impact-options { display: flex; flex-wrap: wrap; gap: 6px; }
+.impact-options button { display: inline-flex; align-items: center; gap: 6px; min-height: 36px;
+  padding: 4px 9px; border-radius: 6px; border: 1px solid #404049; color: var(--text); background: var(--surface); }
+.impact-options button[aria-pressed="true"] { border-color: #88bde8; background: #20354b; color: #e2f2ff; }
+.impact-options button span { color: var(--muted); font-variant-numeric: tabular-nums; }
+.impact-options button:focus-visible { outline: 2px solid #88bde8; outline-offset: 2px; }
+.impact-label { color: #b5dcff; border-color: #476480; }
+.impact-label.is-unknown { color: var(--muted); border-color: #48434f; }
+.impact-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-block: 8px 14px; }
+.impact-summary small { color: var(--muted); }

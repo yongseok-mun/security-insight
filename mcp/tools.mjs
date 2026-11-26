@@ -58,12 +58,18 @@ add('get_snapshot_status', '현재 데이터 게시 시각, 출처별 상태와 
 });
 
 add('list_cves', '공개 CVE를 ID·제목·제품명으로 검색합니다. 최신 공개순, KEV 등재순 또는 EPSS 점수순으로 조회합니다.', {
-  query, view: choice('all', 'critical', 'kev', 'epss'), scope: choice('current', 'archive'), ...listing,
+  query, view: choice('all', 'critical', 'kev', 'epss'), scope: choice('current', 'archive'),
+  impactArea: choice('kernel', 'system', 'web-service', 'web-app', 'appliance',
+    'database', 'cloud-virtualization', 'library-runtime', 'unclassified'), ...listing,
 }, async (args) => {
   const data = await load('data.json');
   const archived = args.scope === 'archive';
   const source = archived ? Object.values(await load('cve-archive.json')) : data.cves;
   let items = source.filter((item) => !args.query || matchesCve(item, args.query.toLowerCase()));
+  if (args.impactArea) items = items.filter((item) => {
+    const areas = item.impactArea?.areas ?? [];
+    return args.impactArea === 'unclassified' ? !areas.length : areas.includes(args.impactArea);
+  });
   if (args.view === 'critical') items = items.filter((item) => item.cvss >= 9);
   if (args.view === 'kev') {
     items = items.filter((item) => item.kev === true)
@@ -75,7 +81,8 @@ add('list_cves', '공개 CVE를 ID·제목·제품명으로 검색합니다. 최
     items.sort(newest);
   }
   const summaries = items.map(({ id, title, product, published, cvss, cvssSource, epss, kev, kevDate,
-    archivedAt }) => ({ id, title, product, published, cvss, cvssSource, epss, kev, kevDate, archivedAt }));
+    archivedAt, impactArea }) => ({ id, title, product, published, cvss, cvssSource, epss, kev, kevDate, archivedAt,
+    impactArea: impactArea ?? { primary: 'unclassified', areas: [], evidence: {} } }));
   return fromSnapshot(data, { scope: archived ? 'archive' : 'current', ...page(summaries, args) });
 });
 

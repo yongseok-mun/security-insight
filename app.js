@@ -198,6 +198,59 @@ function cveSearchMatch(item, query) {
   return null;
 }
 
+const impactLabels = {
+  'kernel': '커널·드라이버',
+  'system': 'OS·시스템',
+  'web-service': '웹서버·WAS',
+  'web-app': '웹 앱',
+  'appliance': '네트워크·보안 장비',
+  'database': 'DB·데이터',
+  'cloud-virtualization': '클라우드·가상화',
+  'library-runtime': '라이브러리·런타임',
+  'unclassified': '분류 확인 필요',
+};
+const impactEvidenceLabels = {cna:'CNA 영향 제품', nvd:'NVD 취약 제품', advisory:'공식 공지 제품명', product:'게시본 제품명'};
+let impactFilter = '';
+
+function impactAreas(item) {
+  return item.impactArea?.areas?.filter((area) => Object.hasOwn(impactLabels, area) && area !== 'unclassified') || [];
+}
+
+function impactPill(area) {
+  return `<span class="pill impact-label${area === 'unclassified' ? ' is-unknown' : ''}">${impactLabels[area]}</span>`;
+}
+
+const impactOptions = $('#impact-options');
+for (const [area, label] of [['', '전체'], ...Object.entries(impactLabels)]) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.dataset.impactArea = area;
+  button.setAttribute('aria-pressed', String(area === impactFilter));
+  button.append(label, document.createElement('span'));
+  impactOptions.append(button);
+}
+impactOptions.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-impact-area]');
+  if (!button) return;
+  impactFilter = button.dataset.impactArea;
+  renderRows();
+});
+
+function updateImpactOptions(records) {
+  const counts = new Map([['', records.length]]);
+  for (const item of records) {
+    const areas = impactAreas(item);
+    for (const area of areas.length ? areas : ['unclassified']) {
+      counts.set(area, (counts.get(area) || 0) + 1);
+    }
+  }
+  for (const button of impactOptions.children) {
+    const area = button.dataset.impactArea;
+    button.setAttribute('aria-pressed', String(area === impactFilter));
+    button.lastElementChild.textContent = counts.get(area) || 0;
+  }
+}
+
 function rowsForFilters() {
   const query = $('#query').value.trim();
   const product = $('#product').value;
@@ -419,7 +472,13 @@ function placeCveInspector() {
 wideCveLayout.addEventListener('change', placeCveInspector);
 
 function renderRows() {
-  const records = rowsForFilters();
+  const candidates = rowsForFilters();
+  updateImpactOptions(candidates);
+  const records = candidates.filter((item) => {
+    if (!impactFilter) return true;
+    const areas = impactAreas(item);
+    return impactFilter === 'unclassified' ? !areas.length : areas.includes(impactFilter);
+  });
   const previousSelection = selected;
   if (!records.includes(selected)) selected = null;
   if (page === 'cve' && (selected || previousSelection)) setCveLocation(selected?.id);
@@ -443,6 +502,7 @@ function renderRows() {
         </span>
         <span class="cve-description"><strong>${escape(cveHeading(item))}</strong>${item.product ? `<small>${escape(item.product)}</small>` : ''}</span>
         <span class="cve-meta">
+          ${impactPill(impactAreas(item)[0] || 'unclassified')}
           ${sourceMatch ? `<span class="pill">${escape(sourceMatch)}</span>` : ''}
           ${archiveResults.includes(item) ? '<span class="pill">보관 자료</span>' : ''}
           <span class="pill ${severity}">CVSS ${Number.isFinite(item.cvss) ? cvss(item) : '미확인'}</span>
@@ -1665,12 +1725,19 @@ function renderInspector(panel = $('#inspector'), item = selected) {
     return;
   }
   const state = reviewState(item);
+  const areas = impactAreas(item);
   panel.innerHTML = `
     <div class="inspector-heading">
       <div class="eyebrow"><span>${escape(item.id)}</span></div>
       ${panel.id === 'inspector' ? '<button type="button" class="outline inspector-close" data-close-inspector>상세 닫기</button>' : ''}
     </div>
     <h2 tabindex="-1">${escape(cveHeading(item))}</h2>
+    <div class="impact-summary" aria-label="영향 영역">
+      ${(areas.length ? areas : ['unclassified']).map((area) => {
+        const source = impactEvidenceLabels[item.impactArea?.evidence?.[area]];
+        return impactPill(area) + (source ? `<small>${source}</small>` : '');
+      }).join('')}
+    </div>
     <div class="actions inspector-quick-actions" role="group" aria-label="선택한 CVE 작업">
       ${comparisonProducts(item).length ? '<button class="accent" type="button" data-asset-csv>자산 CSV 대조</button>' : ''}
       <button class="outline" type="button" data-copy-cve>${icon('link')}CVE 링크 복사</button>
@@ -2680,6 +2747,7 @@ $('#guide').addEventListener('click', (event) => {
 });
 function openCve(id) {
   $('#filters').reset();
+  impactFilter = '';
   view = 'latest';
   showPage('cve');
   selectItem(id);
@@ -3062,6 +3130,7 @@ function openIncomingCve(id) {
   const found = data.cves.some((item) => item.id === id);
   status.hidden = true;
   $('#filters').reset();
+  impactFilter = '';
   view = 'latest';
   showPage('cve');
   $('#query').value = id;

@@ -60,7 +60,8 @@ add('get_snapshot_status', '현재 데이터 게시 시각, 출처별 상태와 
 add('list_cves', '공개 CVE를 ID·제목·제품명으로 검색합니다. 최신 공개순, KEV 등재순 또는 EPSS 점수순으로 조회합니다.', {
   query, view: choice('all', 'critical', 'kev', 'epss'), scope: choice('current', 'archive'),
   impactArea: choice('kernel', 'system', 'web-service', 'web-app', 'appliance',
-    'database', 'cloud-virtualization', 'library-runtime', 'unclassified'), ...listing,
+    'database', 'cloud-virtualization', 'library-runtime', 'development', 'endpoint',
+    'industrial', 'network-service', 'unclassified'), ...listing,
 }, async (args) => {
   const data = await load('data.json');
   const archived = args.scope === 'archive';

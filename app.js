@@ -207,9 +207,13 @@ const impactLabels = {
   'database': 'DB·데이터',
   'cloud-virtualization': '클라우드·가상화',
   'library-runtime': '라이브러리·런타임',
-  'unclassified': '분류 확인 필요',
+  'development': '개발·빌드 도구',
+  'endpoint': '브라우저·업무 앱',
+  'industrial': '산업·제어 시스템',
+  'network-service': 'DNS·메일·통신 서비스',
+  'unclassified': '미분류',
 };
-const impactEvidenceLabels = {cna:'CNA 영향 제품', nvd:'NVD 취약 제품', advisory:'공식 공지 제품명', product:'게시본 제품명'};
+const impactEvidenceLabels = {cna:'CNA 영향 제품', nvd:'NVD 취약 제품', advisory:'공식 공지 제품명', product:'게시본 제품명', 'nvd-cpe':'NVD 운영체제 유형', title:'제목의 제품명'};
 let impactFilter = '';
 
 function impactAreas(item) {
@@ -244,6 +248,10 @@ function updateImpactOptions(records) {
       counts.set(area, (counts.get(area) || 0) + 1);
     }
   }
+  const unclassified = counts.get('unclassified') || 0;
+  $('#impact-coverage').textContent = records.length
+    ? `분류 ${records.length - unclassified}/${records.length}건`
+    : '';
   for (const button of impactOptions.children) {
     const area = button.dataset.impactArea;
     button.setAttribute('aria-pressed', String(area === impactFilter));
@@ -502,7 +510,7 @@ function renderRows() {
         </span>
         <span class="cve-description"><strong>${escape(cveHeading(item))}</strong>${item.product ? `<small>${escape(item.product)}</small>` : ''}</span>
         <span class="cve-meta">
-          ${impactPill(impactAreas(item)[0] || 'unclassified')}
+          ${impactAreas(item).slice(0, 1).map(impactPill).join('')}
           ${sourceMatch ? `<span class="pill">${escape(sourceMatch)}</span>` : ''}
           ${archiveResults.includes(item) ? '<span class="pill">보관 자료</span>' : ''}
           <span class="pill ${severity}">CVSS ${Number.isFinite(item.cvss) ? cvss(item) : '미확인'}</span>

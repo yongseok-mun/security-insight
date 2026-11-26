@@ -740,49 +740,58 @@ def apply_official_patches(item, old, news):
 # Match named product families conservatively. Unrecognized products stay unclassified.
 IMPACT_RULES = tuple((area, re.compile(pattern, re.I)) for area, pattern in (
     ('kernel', r'\b(?:linux kernel|windows kernel|freebsd kernel|xnu kernel|kernel driver|kernel module)\b'),
-    ('appliance', r'\b(?:fortios|fortigate|pan os|globalprotect|big ip|netscaler|citrix adc|junos|ios xe|ios xr|asa software|secure firewall|sonicos|pulse connect secure|ivanti connect secure|ivanti policy secure|sophos firewall|routeros|watchguard firebox|edgeos|draytek vigor)\b'),
+    ('appliance', r'\b(?:fortios|fortigate|pan os|globalprotect|big ip|netscaler|citrix adc|junos|ios xe|ios xr|asa software|secure firewall|sonicos|pulse connect secure|ivanti connect secure|ivanti policy secure|sophos firewall|routeros|watchguard firebox|edgeos|draytek vigor|barracuda email security gateway|email security gateway esg|check point gaia|checkpoint gaia|pfsense|opnsense|cisco firepower|arubaos|airwave|fortimanager|fortianalyzer)\b'),
     ('web-service', r'\b(?:nginx|openresty|apache http server|apache httpd|http server|httpd|tomcat|jetty|iis|internet information services|haproxy|envoy proxy|traefik|weblogic|websphere|wildfly|jboss eap|undertow|lighttpd|caddy server)\b'),
-    ('web-app', r'\b(?:wordpress|drupal|joomla|magento|mediawiki|confluence|jira|sharepoint|roundcube|gitlab|jenkins|grafana|nextcloud|moodle)\b'),
+    ('web-app', r'\b(?:wordpress|pencidesign soledad|penci design soledad|drupal|joomla|magento|mediawiki|confluence|jira|sharepoint|roundcube|grafana|nextcloud|moodle|zabbix|phpmyadmin|keycloak)\b'),
+    ('development', r'\b(?:gitlab|jenkins|gitea|forgejo|github enterprise server|teamcity|atlassian bamboo|azure devops|visual studio code|visual studio|jetbrains intellij idea|eclipse ide|sonarqube|apache maven)\b'),
+    ('endpoint', r'\b(?:microsoft office|microsoft 365 apps|microsoft outlook|adobe acrobat|acrobat reader|adobe photoshop|chromium|google chrome|microsoft edge|mozilla firefox|mozilla thunderbird|apple safari|webkit|libreoffice|remote desktop client|notepad plus plus|7 zip|winrar)\b'),
+    ('industrial', r'\b(?:scada|simatic|wincc|tia portal|factorytalk|codesys|ignition scada|modicon|ecostruxure|studio 5000|control logix)\b'),
+    ('network-service', r'\b(?:unrealircd|inspircd|cisco broadworks|asterisk pbx|freeswitch|postfix|exim|dovecot|sendmail|powerdns|bind 9|unbound dns|exchange server|zimbra collaboration)\b'),
     ('database', r'\b(?:postgresql|mysql|mariadb|oracle database|sql server|mongodb|redis|valkey|elasticsearch|opensearch|sqlite|cassandra|kafka|rabbitmq)\b'),
-    ('cloud-virtualization', r'\b(?:kubernetes|kubelet|containerd|cri o|docker|runc|esxi|vcenter|vsphere|hyper v|qemu|xen|openshift|openstack|proxmox)\b'),
-    ('system', r'\b(?:openssh|openssh server|systemd|polkit|sudo|shadow utils|linux pam|winlogon|windows (?:print spooler|server|10|11)|ubuntu linux|debian linux|red hat enterprise linux|active directory|samba|glibc|gnutls|bind 9|unbound dns)\b'),
+    ('cloud-virtualization', r'\b(?:kubernetes|kubelet|containerd|cri o|docker|runc|esxi|vcenter|vsphere|hyper v|qemu|xen|openshift|openstack|proxmox|gpustack|rancher|nomad|harbor registry|amazon eks|azure kubernetes service)\b'),
+    ('system', r'\b(?:openssh|openssh server|systemd|polkit|sudo|shadow utils|linux pam|winlogon|windows (?:print spooler|server|10|11)|ubuntu linux|debian linux|red hat enterprise linux|active directory|samba|glibc|gnutls)\b'),
     ('library-runtime', r'\b(?:openssl|libssl|libcurl|curl|libxml2|libpng|libssh|log4j|spring framework|node js|openjdk|java runtime|python runtime|zlib|xz utils|php runtime|dotnet runtime|net runtime)\b'),
 ))
 
 
 def classify_impact(item):
-    def matched(products):
-        areas = []
-        for product in products:
-            if not isinstance(product, str):
-                continue
-            name = re.sub(r'[^a-z0-9]+', ' ', product.lower()).strip()
-            if area := next((area for area, rule in IMPACT_RULES if rule.search(name)), None):
-                if area not in areas:
-                    areas.append(area)
-        return areas
+    def match_product(product, *, title=False):
+        if not isinstance(product, str):
+            return None
+        name = re.sub(r'[^a-z0-9]+', ' ', product.lower()).strip()
+        return next((area for area, rule in IMPACT_RULES
+                     if (rule.match(name) if title else rule.search(name))), None)
 
     def nvd_products(node):
         for match in node.get('cpeMatch', []):
             if match.get('vulnerable') is True:
                 parts = re.split(r'(?<!\\):', match.get('criteria') or '')
                 if len(parts) >= 5 and parts[:2] == ['cpe', '2.3']:
-                    yield f'{parts[3]} {parts[4]}'
+                    yield parts[2], f'{parts[3]} {parts[4]}'
         for child in node.get('children', []):
             yield from nvd_products(child)
 
+    nvd_entries = [entry for config in item.get('nvdConfigurations') or []
+                   for node in config.get('nodes', []) for entry in nvd_products(node)]
     entries = (item.get('cna') or {}).get('affected') or []
     evidence = (
         ('cna', (f"{row.get('vendor') or ''} {row.get('product') or ''}" for row in entries)),
-        ('nvd', (product for config in item.get('nvdConfigurations') or []
-                 for node in config.get('nodes', []) for product in nvd_products(node))),
         ('advisory', (row.get('product') for row in item.get('officialPatches') or [])),
+        ('nvd', (product for _, product in nvd_entries)),
         ('product', (item.get('product'),)),
     )
     areas = {}
     for source, products in evidence:
-        for area in matched(products):
-            areas.setdefault(area, source)
+        for product in products:
+            if area := match_product(product):
+                areas.setdefault(area, source)
+
+    if not areas:
+        if any(part == 'o' and not re.search(r'firmware', product, re.I) for part, product in nvd_entries):
+            areas['system'] = 'nvd-cpe'
+        elif not (item.get('product') or '').strip():
+            if area := match_product(item.get('title'), title=True):
+                areas[area] = 'title'
     if not areas:
         return dict(primary='unclassified', areas=[], evidence={})
     return dict(primary=next(iter(areas)), areas=list(areas), evidence=areas)
